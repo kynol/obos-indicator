@@ -1,5 +1,13 @@
 # Changelog
 
+## Review clarifications - 2026-10-15
+
+- Document Auto fallback, exchange-defined session states, baseline update order and both alert contracts.
+- Document the lack of empirical Q calibration evidence and retain existing signal behavior.
+- Explain upstream close-confirmation gating and direction-independent candle body magnitude in source comments.
+- Add a checksum verification utility and a point-by-point review record.
+- Refresh the source checksum in the same commit as the comment changes.
+
 ## Presentation cleanup - 2026-10-15
 
 - Remove cosmetic version labels from alert titles, alert messages and documentation.

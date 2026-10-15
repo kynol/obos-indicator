@@ -39,10 +39,19 @@ The Q score is an internal heuristic quality score, not a calibrated probability
 ## Settings and alerts
 
 - Automatic, 5m, 15m, 1H, 4H and custom presets are provided; their existence is not evidence of equal performance across timeframes.
+- Auto selects presets only on minute charts: 1-5, 6-15, 16-60 and 61-240 minutes, respectively. Seconds, tick, daily/weekly/monthly and minute charts above 240 minutes use Custom values, even though the selector still reads Auto. No Daily preset is provided.
 - Defaults include US-equity intraday assumptions: regular-session signals, time-of-day ATR/RVOL baselines and shock protection. Check these settings before using other markets or sessions.
+- `session.ismarket` follows the symbol's exchange-defined regular session; it is not a US-equity detector. On symbols without extended sessions, such as BTCUSD, it can be true throughout the available session. The script does not automatically recognize and disable US-equity assumptions for other markets. See [TradingView session states](https://www.tradingview.com/pine-script-docs/concepts/sessions/#session-states).
+- Time-of-day baselines use earlier confirmed observations in the same exchange clock-minute slot. Ratios are computed before the current bar updates the arrays. The module builds on historical and confirmed realtime regular-session bars. It falls back to the prior historical median for relative ATR, the prior volume average for RVOL, and the prior ATR% EMA for classic volatility stress when their respective time-of-day baselines are unavailable or inactive. Warm-up and chart session/history settings affect availability; no historical-versus-live parity benchmark is claimed.
 - Higher-timeframe context must be strictly above the chart timeframe. It uses completed higher-timeframe data and therefore involves confirmation delay.
 - Volume filtering is disabled by default. Other enabled modules affect alert eligibility.
 - Close-only confirmation is enabled by default. Intrabar conditions may change if it is disabled.
+
+Both static recovery conditions and dynamic messages inherit the same upstream close-confirmation gate. With `Confirm on close only` enabled, none of these signal conditions can become true on an unconfirmed chart bar. Static alert frequency is selected in TradingView's alert dialog; the dynamic channel specifies its frequency in code. Prefer **Once Per Bar Close** for static alerts when you want close-only operation. After changing the script or inputs, recreate existing alerts: TradingView runs a saved snapshot of the script and settings.
+
+The two channels have different message contracts. Static messages contain the ticker, interval and close placeholders; dynamic messages also include exchange-qualified symbol, lane, Q, state and exchange-local bar-close time. For a downstream parser, use one channel consistently. `{{time}}` in TradingView is UTC bar-open time, not an interchangeable replacement for exchange-local bar-close time.
+
+Q thresholds are heuristic and are not automatically recalibrated when modules or weights change. No current default-parameter SPY timeframe table, empirical Q quantiles, lane frequencies or fresh performance audit is provided. Algebraic scoring bounds do not establish observed score distributions or tradability. Wick-based filtering and score recalibration require separate experiments; neither is added in this documentation update.
 
 Create an alert in TradingView and select the indicator's upward/downward recovery or enhanced conditions. For dynamic messages, enable dynamic alerts and choose `Any alert() function call`. Adding the indicator alone does not create an alert.
 
@@ -59,4 +68,16 @@ Performance requires explicit entry, exit, holding, cost and data-split definiti
 [MIT License](LICENSE). The maintainer confirmed that this version was written with AI assistance without copying third-party scripts. The required Pine compiler directive is preserved; cosmetic version labels are removed.
 
 See [CHANGELOG.md](CHANGELOG.md) for the release record and [SOURCE.sha256](SOURCE.sha256) for the source checksum.
+
+## Verify source integrity
+
+Download both `OBOS.pine` and `SOURCE.sha256` from the same commit or checkout. The checksum applies to the exact source bytes in that checkout, including alert text and comments; any source edit requires updating it in the same commit. Mixing files from different revisions or normalizing line endings can cause a mismatch. Git commit history alone cannot establish whether a checksum is stale.
+
+With Python 3 installed, run from the repository:
+
+```sh
+python scripts/check_integrity.py
+```
+
+The check exits with a nonzero status on mismatch. It verifies integrity, not compilation or trading performance. The [review findings](docs/REVIEW.md) explain the audited code paths and remaining evidence gaps.
 

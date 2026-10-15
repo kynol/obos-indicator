@@ -14,6 +14,7 @@ presetMode = input.string(
      display=display.none
 )
 
+// Auto covers minute charts up to 240 minutes; other chart periods use Custom values.
 auto5m = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier <= 5
 auto15m = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier > 5 and timeframe.multiplier <= 15
 auto1h = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier > 15 and timeframe.multiplier <= 60
@@ -116,6 +117,8 @@ var float[] todVolumeEma = array.new_float(1440, na)
 var int[] todAtrObs = array.new_int(1440, 0)
 var int[] todVolumeObs = array.new_int(1440, 0)
 
+// Snapshot prior confirmed observations for this clock-minute slot before updating it.
+// These scalar snapshots do not change when the arrays are updated later in this execution.
 todAtrBaseline = array.get(todAtrPctEma, todSlot)
 todVolumeBaseline = array.get(todVolumeEma, todSlot)
 todAtrCount = array.get(todAtrObs, todSlot)
@@ -230,6 +233,8 @@ hasVolume = useTodRvol ? not na(todRvol) : classicVolumeReady
 rvol = useTodRvol ? todRvol : classicRvol
 volumeOK = not useVolumeFilter or (hasVolume and rvol >= minRVOL)
 
+// Commit this bar only after computing its ATR/RVOL ratios from the prior baselines.
+// isconfirmed includes historical bars; ordinary var arrays roll back on open-bar ticks.
 if barstate.isconfirmed and timeframe.isintraday and session.ismarket
     if not na(atrPct)
         prevTodAtr = array.get(todAtrPctEma, todSlot)
@@ -915,6 +920,7 @@ buyRevertDiSoft = buyDiTurn ? 0.40 + 0.60 * math.min(1.0, buyDiTurnStrength / 6.
 sellRevertDiSoft = sellDiTurn ? 0.40 + 0.60 * math.min(1.0, sellDiTurnStrength / 6.0) : 0.0
 
 buyCandleBodyExcess = math.max(0.0, signalBodyAtr - minConfirmBodyAtr)
+// Absolute candle body size is direction-independent; only location/direction tests differ.
 sellCandleBodyExcess = buyCandleBodyExcess
 buyCandleLocationExcess = math.max(0.0, buyCloseLocation - 0.62) / 0.38
 sellCandleLocationExcess = math.max(0.0, 0.38 - sellCloseLocation) / 0.38
@@ -1252,6 +1258,8 @@ uiScoreColor =
 plot(displayScore, title="OBOS", color=uiScoreColor, linewidth=2, style=plot.style_stepline, display=display.pane)
 
 // Alerts
+// Both alert channels inherit barConfirmed through raw signal -> lane -> selected signal.
+// With confirmOnClose enabled, all four conditions remain false on unconfirmed ticks.
 alertcondition(buySignal, title="OBOS Upward Recovery", message="OBOS Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
 alertcondition(sellSignal, title="OBOS Downward Recovery", message="OBOS Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
 alertcondition(strongBuySignal, title="OBOS Enhanced Upward Recovery", message="OBOS Enhanced Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
