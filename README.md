@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-A TradingView Pine Script v6 indicator combining RSI, Stochastic, CCI and Bollinger %B into a 0–100 state score, with trend, volatility and recovery conditions for alerts.
+A TradingView Pine Script indicator combining RSI, Stochastic, CCI and Bollinger %B into a 0–100 state score, with trend, volatility and recovery conditions for alerts.
 
 This is an `indicator()`, not a complete trading strategy. It does not place orders, define a full exit system or provide strategy performance results. No win rate or profitability is claimed.
 
@@ -44,7 +44,7 @@ The Q score is an internal heuristic quality score, not a calibrated probability
 - Volume filtering is disabled by default. Other enabled modules affect alert eligibility.
 - Close-only confirmation is enabled by default. Intrabar conditions may change if it is disabled.
 
-Create an alert in TradingView and select the indicator's upward/downward recovery or enhanced conditions. Static condition names retain the source's `OBOS V9.2` text. For dynamic messages, enable dynamic alerts and choose `Any alert() function call`. Adding the indicator alone does not create an alert.
+Create an alert in TradingView and select the indicator's upward/downward recovery or enhanced conditions. For dynamic messages, enable dynamic alerts and choose `Any alert() function call`. Adding the indicator alone does not create an alert.
 
 ## Verification status
 
@@ -56,7 +56,7 @@ Performance requires explicit entry, exit, holding, cost and data-split definiti
 
 ## License and provenance
 
-[MIT License](LICENSE). The maintainer confirmed that this version was written with AI assistance without copying third-party scripts. The Pine version directive and the alerts' `V9.2` labels are preserved.
+[MIT License](LICENSE). The maintainer confirmed that this version was written with AI assistance without copying third-party scripts. The required Pine compiler directive is preserved; cosmetic version labels are removed.
 
 See [CHANGELOG.md](CHANGELOG.md) for the release record and [SOURCE.sha256](SOURCE.sha256) for the source checksum.
 

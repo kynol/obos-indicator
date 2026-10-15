@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-用于 TradingView 的 Pine Script v6 副图指标。将 RSI、Stochastic、CCI 和 Bollinger %B 合成为 0–100 的状态分数，并结合趋势、波动和恢复条件生成警报。
+用于 TradingView 的 Pine Script 副图指标。将 RSI、Stochastic、CCI 和 Bollinger %B 合成为 0–100 的状态分数，并结合趋势、波动和恢复条件生成警报。
 
 这是一个市场状态分析与研究工具，使用 `indicator()`，不包含自动下单、完整进出场策略或策略收益报告。本仓库不承诺胜率或盈利表现。
 
@@ -60,7 +60,7 @@ GitHub 用于保存和分发源码；本仓库没有 TradingView 社区脚本发
 
 ## 创建警报
 
-在 TradingView 创建警报，选择此脚本，再选择 `Upward Recovery`、`Downward Recovery` 及对应的 `Enhanced` 条件。源码中的静态警报名称保留 `OBOS V9.2`。
+在 TradingView 创建警报，选择此脚本，再选择 `Upward Recovery`、`Downward Recovery` 及对应的 `Enhanced` 条件。
 
 如需动态消息，启用 `Enable dynamic alert messages`，并选择脚本的 `Any alert() function call` 条件或界面中的对应翻译。动态消息包含标的、周期、通道、Q、价格和时间等信息。仅把脚本加到图表上不会自动创建警报。
 
@@ -89,5 +89,5 @@ GitHub 用于保存和分发源码；本仓库没有 TradingView 社区脚本发
 
 ## 许可证与来源
 
-按 [MIT License](LICENSE) 发布。维护者确认该版本由其与 AI 协作编写，未复制第三方脚本。必要的编译版本声明和警报中的 `V9.2` 文字保留；陈旧的章节版本注释已清理。
+按 [MIT License](LICENSE) 发布。维护者确认该版本由其与 AI 协作编写，未复制第三方脚本。保留必要的 Pine 编译声明，移除展示用版本字样和陈旧的章节版本注释。
 

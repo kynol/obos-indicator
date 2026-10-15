@@ -1252,16 +1252,16 @@ uiScoreColor =
 plot(displayScore, title="OBOS", color=uiScoreColor, linewidth=2, style=plot.style_stepline, display=display.pane)
 
 // Alerts
-alertcondition(buySignal, title="OBOS V9.2 Upward Recovery", message="OBOS V9.2 Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
-alertcondition(sellSignal, title="OBOS V9.2 Downward Recovery", message="OBOS V9.2 Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
-alertcondition(strongBuySignal, title="OBOS V9.2 Enhanced Upward Recovery", message="OBOS V9.2 Enhanced Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
-alertcondition(strongSellSignal, title="OBOS V9.2 Enhanced Downward Recovery", message="OBOS V9.2 Enhanced Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(buySignal, title="OBOS Upward Recovery", message="OBOS Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(sellSignal, title="OBOS Downward Recovery", message="OBOS Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(strongBuySignal, title="OBOS Enhanced Upward Recovery", message="OBOS Enhanced Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(strongSellSignal, title="OBOS Enhanced Downward Recovery", message="OBOS Enhanced Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
 
 useDynamicAlerts = input.bool(true, "Enable dynamic alert messages (create the alert manually)", group="13 Alerts", display=display.none)
 if useDynamicAlerts and anySignal
     signalTime = na(time_close) ? "Unknown bar close time" : str.format_time(time_close, "yyyy-MM-dd HH:mm:ss", syminfo.timezone)
     laneText = signalLaneCode == 1 ? "Trend pullback" : signalLaneCode == 2 ? "Mean reversion" : "Unknown"
-    alertMessage = "OBOS V9.2 | " + syminfo.tickerid + " | TF=" + timeframe.period + " | " + signalName + " | Lane=" + laneText + " | State=" + (barstate.isconfirmed ? "Closed" : "Intrabar - may change") + " | Q=" + str.tostring(math.round(signalQ)) + " | price=" + str.tostring(close, format.mintick) + " | bar_close=" + signalTime + " " + syminfo.timezone
+    alertMessage = "OBOS | " + syminfo.tickerid + " | TF=" + timeframe.period + " | " + signalName + " | Lane=" + laneText + " | State=" + (barstate.isconfirmed ? "Closed" : "Intrabar - may change") + " | Q=" + str.tostring(math.round(signalQ)) + " | price=" + str.tostring(close, format.mintick) + " | bar_close=" + signalTime + " " + syminfo.timezone
     if confirmOnClose
         alert(alertMessage, alert.freq_once_per_bar_close)
     else
