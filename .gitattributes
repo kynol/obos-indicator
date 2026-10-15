@@ -1,0 +1,4 @@
+*.md text eol=lf
+LICENSE text eol=lf
+SOURCE.sha256 text eol=lf
+*.pine -text

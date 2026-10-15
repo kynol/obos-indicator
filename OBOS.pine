@@ -1,0 +1,1268 @@
+//@version=6
+indicator(
+     "Composite Overbought/Oversold Indicator",
+     shorttitle="  ",
+     overlay=false,
+     explicit_plot_zorder=true
+)
+
+// Timeframe presets
+presetMode = input.string(
+     "Auto", "Timeframe preset",
+     options=["Auto", "5m Scalping", "15m Short-term", "1H Swing", "4H Swing", "Custom"],
+     group="01 Timeframe presets",
+     display=display.none
+)
+
+auto5m = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier <= 5
+auto15m = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier > 5 and timeframe.multiplier <= 15
+auto1h = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier > 15 and timeframe.multiplier <= 60
+auto4h = presetMode == "Auto" and timeframe.isminutes and timeframe.multiplier > 60 and timeframe.multiplier <= 240
+
+use5m = presetMode == "5m Scalping" or auto5m
+use15m = presetMode == "15m Short-term" or auto15m
+use1h = presetMode == "1H Swing" or auto1h
+use4h = presetMode == "4H Swing" or auto4h
+
+// Base indicators
+rsiLen = input.int(14, "RSI length", minval=2, group="02 Base indicators", display=display.none)
+stochLen = input.int(14, "Stochastic length", minval=2, group="02 Base indicators", display=display.none)
+cciLen = input.int(20, "CCI length", minval=2, group="02 Base indicators", display=display.none)
+bbLen = input.int(20, "Bollinger Bands length", minval=2, group="02 Base indicators", display=display.none)
+bbMult = input.float(2.0, "Bollinger Bands multiplier", minval=0.1, step=0.1, group="02 Base indicators", display=display.none)
+
+// Composite weights
+rsiWeight = input.float(35, "RSI weight", minval=0, step=1, group="03 Composite weights", display=display.none)
+stochWeight = input.float(20, "Stochastic weight", minval=0, step=1, group="03 Composite weights", display=display.none)
+cciWeight = input.float(20, "CCI weight", minval=0, step=1, group="03 Composite weights", display=display.none)
+bbWeight = input.float(25, "Bollinger %B weight", minval=0, step=1, group="03 Composite weights", display=display.none)
+weightSum = rsiWeight + stochWeight + cciWeight + bbWeight
+
+// OB/OS thresholds
+overBought = input.float(70, "Overbought level", minval=0, maxval=100, group="04 OB/OS thresholds", display=display.none)
+strongOverBought = input.float(80, "Extreme overbought level", minval=0, maxval=100, group="04 OB/OS thresholds", display=display.none)
+overSold = input.float(30, "Oversold level", minval=0, maxval=100, group="04 OB/OS thresholds", display=display.none)
+strongOverSold = input.float(20, "Extreme oversold level", minval=0, maxval=100, group="04 OB/OS thresholds", display=display.none)
+
+// Signal settings
+customSmoothLen = input.int(3, "Custom: composite score smoothing", minval=1, maxval=20, group="05 Signal settings", display=display.none)
+customExtremeLookback = input.int(15, "Custom: armed-state validity in bars", minval=1, maxval=100, group="05 Signal settings", display=display.none)
+customCooldown = input.int(5, "Custom: full same-direction cooldown bars", minval=0, maxval=100, group="05 Signal settings", display=display.none)
+customConfirmWindow = input.int(3, "Custom: extra confirmation bars after zone exit", minval=0, maxval=20, group="05 Signal settings", display=display.none)
+confirmOnClose = input.bool(true, "Confirm on close only (intrabar signals may disappear if disabled)", group="05 Signal settings", display=display.none)
+
+customEmaFast = input.int(20, "Custom: fast EMA length", minval=2, group="07 Trend filter", display=display.none)
+customEmaSlow = input.int(50, "Custom: slow EMA length", minval=2, group="07 Trend filter", display=display.none)
+
+smoothLen = use5m ? 3 : use15m ? 3 : use1h ? 3 : use4h ? 3 : customSmoothLen
+extremeLookback = use5m ? 18 : use15m ? 12 : use1h ? 8 : use4h ? 6 : customExtremeLookback
+cooldownBars = use5m ? 8 : use15m ? 6 : use1h ? 4 : use4h ? 5 : customCooldown
+confirmWindow = use5m ? 3 : use15m ? 3 : use1h ? 2 : use4h ? 3 : customConfirmWindow
+emaFastLen = use5m ? 21 : use15m ? 20 : use1h ? 20 : use4h ? 20 : customEmaFast
+emaSlowLen = use5m ? 55 : use15m ? 50 : use1h ? 50 : use4h ? 50 : customEmaSlow
+
+// Price confirmation
+priceConfirmMode = input.string(
+     "Strict", "Price confirmation mode", options=["Off", "Relaxed", "Strict"],
+     group="06 Price confirmation",
+     display=display.none
+)
+priceConfirmAtrBuffer = input.float(0.08, "Price breakout buffer in ATR", minval=0.0, maxval=1.0, step=0.01, group="06 Price confirmation", display=display.none)
+useMomentumConfirm = input.bool(true, "Require score continuation in the confirmation direction", group="06 Price confirmation", display=display.none)
+momentumBars = input.int(2, "Momentum confirmation span in bars", minval=1, maxval=3, group="06 Price confirmation", display=display.none)
+minMomentumNet = input.float(1.0, "Minimum net score recovery over the span", minval=0.0, step=0.1, group="06 Price confirmation", display=display.none)
+allowExitBarConfirm = input.bool(true, "Allow confirmation on the zone-exit bar", group="06 Price confirmation", display=display.none)
+minExitRecovery = input.float(0.5, "Minimum additional score recovery after zone exit", minval=0.0, step=0.1, group="06 Price confirmation", display=display.none)
+
+// EMA, ADX and ATR
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+bullTrend = close > emaFast and emaFast > emaSlow
+bearTrend = close < emaFast and emaFast < emaSlow
+
+diLen = input.int(14, "DI length", minval=2, group="08 ADX", display=display.none)
+adxSmooth = input.int(14, "ADX smoothing", minval=2, group="08 ADX", display=display.none)
+adxStrong = input.float(28, "Strong-trend ADX threshold", minval=20, maxval=100, step=1, group="08 ADX", display=display.none)
+trendFilterMode = input.string(
+     "Quality penalty", "Trend handling", options=["Off", "Quality penalty", "Block countertrend", "Trend-following only"],
+     group="08 ADX",
+     display=display.none
+)
+[diPlus, diMinus, adx] = ta.dmi(diLen, adxSmooth)
+strongTrend = not na(adx) and adx >= adxStrong
+againstBuyTrend = bearTrend and strongTrend
+againstSellTrend = bullTrend and strongTrend
+
+useAtrFilter = input.bool(true, "Enable ATR module (excluded from gates and Q when disabled)", group="09 ATR volatility", display=display.none)
+atrLen = input.int(14, "ATR length", minval=2, group="09 ATR volatility", display=display.none)
+minAtrPct = input.float(0.20, "Minimum ATR %", minval=0, step=0.05, group="09 ATR volatility", display=display.none)
+maxAtrPct = input.float(10.0, "Maximum ATR %", minval=0, step=0.25, group="09 ATR volatility", display=display.none)
+atr = ta.atr(atrLen)
+atrPct = close != 0 ? atr / math.abs(close) * 100 : na
+atrFilterMode = input.string("Relative volatility", "ATR filter mode", options=["Relative volatility", "Fixed percentage"], group="09 ATR volatility", display=display.none)
+adaptiveVolLen = input.int(100, "Relative-volatility history window", minval=30, maxval=500, group="09 ATR volatility", display=display.none)
+minRelativeAtr = input.float(0.35, "Minimum ATR / historical median", minval=0.05, maxval=2.0, step=0.05, group="09 ATR volatility", display=display.none)
+maxRelativeAtr = input.float(2.50, "Maximum ATR / historical median", minval=1.0, maxval=10.0, step=0.1, group="09 ATR volatility", display=display.none)
+
+useIntradaySeasonality = input.bool(true, "Normalize intraday ATR/RVOL by time of day", group="09B US equity session context", display=display.none)
+intradaySeasonalityDays = input.int(20, "Time-of-day baseline EMA length in days", minval=5, maxval=60, group="09B US equity session context", display=display.none)
+intradaySeasonalityMinObs = input.int(5, "Minimum time-of-day historical observations", minval=2, maxval=20, group="09B US equity session context", display=display.none)
+
+todSlot = hour(time) * 60 + minute(time)
+todAlpha = 2.0 / (intradaySeasonalityDays + 1.0)
+
+var float[] todAtrPctEma = array.new_float(1440, na)
+var float[] todVolumeEma = array.new_float(1440, na)
+var int[] todAtrObs = array.new_int(1440, 0)
+var int[] todVolumeObs = array.new_int(1440, 0)
+
+todAtrBaseline = array.get(todAtrPctEma, todSlot)
+todVolumeBaseline = array.get(todVolumeEma, todSlot)
+todAtrCount = array.get(todAtrObs, todSlot)
+todVolumeCount = array.get(todVolumeObs, todSlot)
+
+todSessionActive = useIntradaySeasonality and timeframe.isintraday and session.ismarket
+todAtrReady = todSessionActive and todAtrCount >= intradaySeasonalityMinObs and not na(todAtrBaseline) and todAtrBaseline > 0
+todVolumeReady = todSessionActive and todVolumeCount >= intradaySeasonalityMinObs and not na(todVolumeBaseline) and todVolumeBaseline > 0
+
+atrPctBaseline = ta.median(atrPct, adaptiveVolLen)[1]
+relativeAtrClassic = not na(atrPctBaseline) and atrPctBaseline > 0 ? atrPct / atrPctBaseline : na
+relativeAtrTod = todAtrReady ? atrPct / todAtrBaseline : na
+useTodAtr = todAtrReady
+relativeAtr = useTodAtr ? relativeAtrTod : relativeAtrClassic
+relativeVolReady = useTodAtr or (not na(relativeAtrClassic) and bar_index >= adaptiveVolLen + atrLen)
+
+atrNormal = atrFilterMode == "Relative volatility" ? relativeVolReady and relativeAtr >= minRelativeAtr and relativeAtr <= maxRelativeAtr : not na(atrPct) and atrPct >= minAtrPct and atrPct <= maxAtrPct
+atrOK = not useAtrFilter or atrNormal
+
+regularSessionOnly = input.bool(true, "Intraday signals during regular session only", group="09B US equity session context", display=display.none)
+sessionOK = not regularSessionOnly or not timeframe.isintraday or session.ismarket
+useShockFilter = input.bool(true, "Block abnormal range/gap bars", group="09B US equity session context", display=display.none)
+maxShockAtr = input.float(3.5, "Maximum true range / previous ATR", minval=1.0, maxval=15.0, step=0.25, group="09B US equity session context", display=display.none)
+barTrueRange = ta.tr(true)
+shockRatio = not na(atr[1]) and atr[1] > 0 ? barTrueRange / atr[1] : na
+shockOK = not useShockFilter or (not na(shockRatio) and shockRatio <= maxShockAtr)
+
+// Local trend and confirmed higher-timeframe context
+microEmaLen = use5m ? 8 : use15m ? 9 : use1h ? 8 : use4h ? 8 : 9
+microEma = ta.ema(close, microEmaLen)
+microBullTurn = close > microEma and microEma > microEma[1]
+microBearTurn = close < microEma and microEma < microEma[1]
+
+slowSlopeBars = use1h ? 3 : use4h ? 3 : 4
+emaSlowSlopeAtr = atr > 0 and not na(emaSlow[slowSlopeBars]) ? (emaSlow - emaSlow[slowSlopeBars]) / atr : na
+slowBullAligned = not na(emaSlowSlopeAtr) and emaSlowSlopeAtr >= 0.0
+slowBearAligned = not na(emaSlowSlopeAtr) and emaSlowSlopeAtr <= 0.0
+
+useHtfContext = input.bool(true, "Enable higher-timeframe context", group="07B Higher timeframe", display=display.none)
+customHtf = input.timeframe("", "Higher timeframe (blank = auto)", group="07B Higher timeframe", display=display.none)
+chartSeconds = timeframe.in_seconds()
+autoHtf = chartSeconds <= 300 ? "15" : chartSeconds <= 900 ? "60" : chartSeconds <= 3600 ? "240" : chartSeconds < 86400 ? "1D" : chartSeconds < 604800 ? "1W" : chartSeconds < 2592000 ? "1M" : "12M"
+htfTf = customHtf == "" ? autoHtf : customHtf
+htfContextActive = useHtfContext
+
+if barstate.isfirst and htfContextActive and (na(chartSeconds) or timeframe.in_seconds(htfTf) <= chartSeconds)
+    runtime.error("The context timeframe must be strictly above the chart timeframe. Select a higher timeframe or disable HTF context.")
+
+[htfClose, htfFast, htfSlow, htfFastPrev, htfAtr] = request.security(
+     syminfo.tickerid, htfTf,
+     [close[1], ta.ema(close, emaFastLen)[1], ta.ema(close, emaSlowLen)[1], ta.ema(close, emaFastLen)[2], ta.atr(atrLen)[1]],
+     lookahead=barmerge.lookahead_on
+)
+
+htfReady = not htfContextActive or (not na(htfClose) and not na(htfFast) and not na(htfSlow) and not na(htfFastPrev) and not na(htfAtr))
+htfBull = htfContextActive and htfClose > htfFast and htfFast > htfSlow
+htfBear = htfContextActive and htfClose < htfFast and htfFast < htfSlow
+htfBullAlignedRaw = htfBull and htfFast >= htfFastPrev
+htfBearAlignedRaw = htfBear and htfFast <= htfFastPrev
+
+persistLen = use5m ? 18 : use15m ? 20 : use1h ? 16 : use4h ? 14 : 20
+persistPathMean = ta.sma(math.abs(ta.change(close)), persistLen)
+persistPath = not na(persistPathMean) ? persistPathMean * persistLen : na
+persistNet = not na(close[persistLen]) ? math.abs(close - close[persistLen]) : na
+efficiencyRatio = not na(persistPath) and persistPath > 0 and not na(persistNet) ? persistNet / persistPath : 0.0
+persistDriftAtr = atr > 0 and not na(close[persistLen]) ? (close - close[persistLen]) / atr : 0.0
+macroEmaLen = use5m ? 120 : use15m ? 100 : use1h ? 80 : use4h ? 60 : 100
+macroEma = ta.ema(close, macroEmaLen)
+macroSlopeBars = use5m ? 10 : use15m ? 8 : use1h ? 5 : use4h ? 4 : 8
+macroSlopeAtr = atr > 0 and not na(macroEma[macroSlopeBars]) ? (macroEma - macroEma[macroSlopeBars]) / atr : 0.0
+persistErMin = use5m ? 0.34 : use15m ? 0.32 : use1h ? 0.30 : use4h ? 0.28 : 0.32
+persistDriftMin = use5m ? 2.2 : use15m ? 2.0 : use1h ? 1.8 : use4h ? 1.6 : 2.0
+persistentBull = efficiencyRatio >= persistErMin and persistDriftAtr >= persistDriftMin and macroSlopeAtr > 0
+persistentBear = efficiencyRatio >= persistErMin and persistDriftAtr <= -persistDriftMin and macroSlopeAtr < 0
+
+htfSpreadAtr = htfContextActive and not na(htfAtr) and htfAtr > 0 ? math.abs(htfFast - htfSlow) / htfAtr : 0.0
+htfStrongSpreadMin = use5m ? 0.24 : use15m ? 0.26 : use1h ? 0.28 : 0.30
+
+htfAlignedSpreadMin = htfStrongSpreadMin * 0.35
+htfBullAligned = htfBullAlignedRaw and htfSpreadAtr >= htfAlignedSpreadMin
+htfBearAligned = htfBearAlignedRaw and htfSpreadAtr >= htfAlignedSpreadMin
+htfBullStrong = htfBullAligned and htfSpreadAtr >= htfStrongSpreadMin
+htfBearStrong = htfBearAligned and htfSpreadAtr >= htfStrongSpreadMin
+
+if barstate.isfirst
+    if weightSum <= 0
+        runtime.error("The four component weights must sum to more than zero. Check the composite weights.")
+    if not (strongOverSold < overSold and overSold < 50 and 50 < overBought and overBought < strongOverBought)
+        runtime.error("Thresholds must satisfy: extreme oversold < oversold < 50 < overbought < extreme overbought.")
+    if minRelativeAtr > maxRelativeAtr
+        runtime.error("Minimum relative ATR cannot exceed maximum relative ATR.")
+    if minAtrPct > maxAtrPct
+        runtime.error("Minimum ATR % cannot exceed maximum ATR %.")
+    if emaFastLen >= emaSlowLen
+        runtime.error("The effective fast EMA length must be shorter than the slow EMA length.")
+
+// Relative volume
+useVolumeFilter = input.bool(false, "Enable RVOL module (excluded from gates and Q when disabled)", group="10 Volume confirmation", display=display.none)
+volumeLen = input.int(20, "Historical volume average length", minval=2, group="10 Volume confirmation", display=display.none)
+minRVOL = input.float(1.10, "Minimum RVOL", minval=0, step=0.05, group="10 Volume confirmation", display=display.none)
+volumeMA = ta.sma(volume, volumeLen)
+volumeMAprev = volumeMA[1]
+volumeValidFraction = ta.sma(not na(volume) and volume >= 0 ? 1.0 : 0.0, volumeLen)
+volumeHistoryReady = not na(volumeValidFraction[1]) and volumeValidFraction[1] == 1.0
+
+classicVolumeReady = volumeHistoryReady and not na(volume) and volume >= 0 and not na(volumeMAprev) and volumeMAprev > 0
+classicRvol = classicVolumeReady ? volume / volumeMAprev : na
+todRvol = todVolumeReady and not na(volume) and volume >= 0 ? volume / todVolumeBaseline : na
+useTodRvol = todVolumeReady
+
+hasVolume = useTodRvol ? not na(todRvol) : classicVolumeReady
+rvol = useTodRvol ? todRvol : classicRvol
+volumeOK = not useVolumeFilter or (hasVolume and rvol >= minRVOL)
+
+if barstate.isconfirmed and timeframe.isintraday and session.ismarket
+    if not na(atrPct)
+        prevTodAtr = array.get(todAtrPctEma, todSlot)
+        nextTodAtr = na(prevTodAtr) ? atrPct : prevTodAtr + todAlpha * (atrPct - prevTodAtr)
+        array.set(todAtrPctEma, todSlot, nextTodAtr)
+        array.set(todAtrObs, todSlot, array.get(todAtrObs, todSlot) + 1)
+
+    if not na(volume) and volume >= 0
+        prevTodVolume = array.get(todVolumeEma, todSlot)
+        nextTodVolume = na(prevTodVolume) ? volume : prevTodVolume + todAlpha * (volume - prevTodVolume)
+        array.set(todVolumeEma, todSlot, nextTodVolume)
+        array.set(todVolumeObs, todSlot, array.get(todVolumeObs, todSlot) + 1)
+
+// Market regime
+useRegimeFilter = input.bool(true, "Enable local regime restrictions", group="11A Market regime", display=display.none)
+allowTransitionSignals = input.bool(false, "Allow mean reversion in TRANSITION (lower-timeframe presets only)", group="11A Market regime", display=display.none)
+regimeTrendAdx = input.float(25.0, "TREND minimum ADX", minval=10, maxval=60, step=1, group="11A Market regime", display=display.none)
+regimeRangeAdx = input.float(20.0, "RANGE maximum ADX", minval=5, maxval=40, step=1, group="11A Market regime", display=display.none)
+regimeMinSpreadAtr = input.float(0.30, "TREND minimum EMA spread / ATR", minval=0.0, maxval=3.0, step=0.05, group="11A Market regime", display=display.none)
+regimeMaxRangeSpreadAtr = input.float(0.45, "RANGE maximum EMA spread / ATR", minval=0.05, maxval=2.0, step=0.05, group="11A Market regime", display=display.none)
+regimeSlopeBars = input.int(3, "Trend slope lookback in bars", minval=1, maxval=10, group="11A Market regime", display=display.none)
+regimeMinSlopeAtr = input.float(0.06, "TREND minimum fast EMA slope / ATR", minval=0.0, maxval=1.0, step=0.01, group="11A Market regime", display=display.none)
+regimeChaosRangeAtr = input.float(2.80, "CHAOS bar range / ATR", minval=1.0, maxval=10.0, step=0.1, group="11A Market regime", display=display.none)
+regimeChaosAtrMult = input.float(1.80, "CHAOS ATR% baseline multiplier", minval=1.0, maxval=5.0, step=0.05, group="11A Market regime", display=display.none)
+regimeAtrBaseLen = input.int(50, "ATR% baseline length", minval=10, maxval=300, group="11A Market regime", display=display.none)
+
+regimeAtrPctBase = ta.ema(atrPct, regimeAtrBaseLen)[1]
+volStressClassic = not na(regimeAtrPctBase) and regimeAtrPctBase > 0 ? atrPct / regimeAtrPctBase : 1.0
+volStress = useTodAtr ? relativeAtr : volStressClassic
+regimeEmaSpreadAtr = atr > 0 ? math.abs(emaFast - emaSlow) / atr : na
+regimeBarRangeAtr = atr[1] > 0 ? (high - low) / atr[1] : na
+regimeFastSlopeAtr = atr > 0 and not na(emaFast[regimeSlopeBars]) ? (emaFast - emaFast[regimeSlopeBars]) / atr : na
+regimeChaos = not na(regimeBarRangeAtr) and not na(regimeAtrPctBase) and (regimeBarRangeAtr >= regimeChaosRangeAtr or atrPct >= regimeAtrPctBase * regimeChaosAtrMult)
+regimeTrend = not regimeChaos and not na(regimeEmaSpreadAtr) and adx >= regimeTrendAdx and regimeEmaSpreadAtr >= regimeMinSpreadAtr
+regimeRange = not regimeChaos and adx <= regimeRangeAdx and not na(regimeEmaSpreadAtr) and regimeEmaSpreadAtr <= regimeMaxRangeSpreadAtr
+regimeTransition = not regimeChaos and not regimeTrend and not regimeRange
+regimeBullDir = emaFast > emaSlow
+regimeBearDir = emaFast < emaSlow
+regimeTrendBullStructure = regimeTrend and regimeBullDir and not na(regimeFastSlopeAtr) and regimeFastSlopeAtr >= regimeMinSlopeAtr and slowBullAligned
+regimeTrendBearStructure = regimeTrend and regimeBearDir and not na(regimeFastSlopeAtr) and regimeFastSlopeAtr <= -regimeMinSlopeAtr and slowBearAligned
+regimeTrendStable = regimeTrend and regimeTrend[1] and regimeTrend[2]
+regimeRangeStable = regimeRange and regimeRange[1] and regimeRange[2]
+
+if barstate.isfirst and regimeRangeAdx >= regimeTrendAdx
+    runtime.error("RANGE maximum ADX must be below TREND minimum ADX to avoid regime overlap.")
+
+// Base oscillators
+rsi = ta.rsi(close, rsiLen)
+rsiScore = rsi
+
+stoch = ta.stoch(close, high, low, stochLen)
+stochScore = stoch
+
+cci = ta.cci(hlc3, cciLen)
+cciScoreRaw = 50 + cci / 4
+cciScore = math.max(0, math.min(100, cciScoreRaw))
+
+basis = ta.sma(close, bbLen)
+dev = ta.stdev(close, bbLen) * bbMult
+upper = basis + dev
+lower = basis - dev
+bbRange = upper - lower
+bbScoreRaw = na(bbRange) ? na : bbRange > 0 ? (close - lower) / bbRange * 100 : 50
+bbScore = math.max(0, math.min(100, bbScoreRaw))
+
+oscReady = (rsiWeight == 0 or not na(rsiScore)) and (stochWeight == 0 or not na(stochScore)) and (cciWeight == 0 or not na(cciScore)) and (bbWeight == 0 or not na(bbScore))
+weightedSum = (rsiWeight > 0 ? rsiScore * rsiWeight : 0.0) + (stochWeight > 0 ? stochScore * stochWeight : 0.0) + (cciWeight > 0 ? cciScore * cciWeight : 0.0) + (bbWeight > 0 ? bbScore * bbWeight : 0.0)
+rawScore = oscReady and weightSum > 0 ? weightedSum / weightSum : na
+smoothedScore = ta.ema(rawScore, smoothLen)
+score = smoothLen > 1 ? smoothedScore : rawScore
+
+// Weighted oscillator dispersion
+useDispersionFilter = input.bool(true, "Enable oscillator agreement module (excluded from gates and Q when disabled)", group="11 Oscillator agreement", display=display.none)
+maxDispersion = input.float(24, "Maximum weighted oscillator dispersion", minval=1, step=1, group="11 Oscillator agreement", display=display.none)
+oscWeightedMean = rawScore
+oscWeightedVariance = oscReady and weightSum > 0 ? (
+     (rsiWeight > 0 ? rsiWeight * math.pow(rsiScore - oscWeightedMean, 2) : 0.0) +
+     (stochWeight > 0 ? stochWeight * math.pow(stochScore - oscWeightedMean, 2) : 0.0) +
+     (cciWeight > 0 ? cciWeight * math.pow(cciScore - oscWeightedMean, 2) : 0.0) +
+     (bbWeight > 0 ? bbWeight * math.pow(bbScore - oscWeightedMean, 2) : 0.0)
+) / weightSum : na
+oscDispersion = math.sqrt(oscWeightedVariance)
+dispersionOK = not useDispersionFilter or (not na(oscDispersion) and oscDispersion <= maxDispersion)
+
+dataReady = htfReady and
+     bar_index >= macroEmaLen + macroSlopeBars and
+     (not useAtrFilter or atrFilterMode != "Relative volatility" or relativeVolReady) and
+     not na(rawScore) and not na(rawScore[1]) and
+     not na(score) and not na(score[1]) and
+     not na(emaFast) and not na(emaSlow) and
+     not na(adx) and not na(atrPct) and
+     not na(oscDispersion)
+
+// Market readiness and confirmation timing
+neutral = score > overSold and score < overBought
+
+barConfirmed = not confirmOnClose or barstate.isconfirmed
+crossUpOversold = ta.crossover(score, overSold)
+crossDownOverbought = ta.crossunder(score, overBought)
+
+newTradingDay = timeframe.change("1D")
+firstEligibleSessionBar = regularSessionOnly and timeframe.isintraday and sessionOK and (newTradingDay or not sessionOK[1])
+
+// Persistent state
+var int stateBarSeq = 0
+eligibleStateBar = barConfirmed and dataReady and sessionOK and shockOK
+
+var bool sessionNeedsValidInit = false
+if barConfirmed and firstEligibleSessionBar
+    sessionNeedsValidInit := true
+
+firstValidSessionStateBar = regularSessionOnly and timeframe.isintraday and eligibleStateBar and sessionNeedsValidInit
+
+enterStrongOversold =
+     dataReady and score <= strongOverSold and
+     (score[1] > strongOverSold or firstValidSessionStateBar)
+
+enterStrongOverbought =
+     dataReady and score >= strongOverBought and
+     (score[1] < strongOverBought or firstValidSessionStateBar)
+
+if eligibleStateBar
+    stateBarSeq += 1
+
+var int strongBuyArmedSeq = na
+var int strongSellArmedSeq = na
+var int pendingBuySeq = na
+var int pendingSellSeq = na
+var int pendingBuyWindow = na
+var int pendingSellWindow = na
+var bool pendingBuyStrongContext = false
+var bool pendingSellStrongContext = false
+
+var float pendingBuyRefClose = na
+var float pendingBuyRefHigh = na
+var float pendingBuyExitScore = na
+var float pendingBuyRefAtr = na
+var float pendingBuyExtremeScore = na
+
+var float pendingSellRefClose = na
+var float pendingSellRefLow = na
+var float pendingSellExitScore = na
+var float pendingSellRefAtr = na
+var float pendingSellExtremeScore = na
+
+var int oversoldStrongBars = 0
+var int overboughtStrongBars = 0
+var int pendingBuyStrongBars = na
+var int pendingSellStrongBars = na
+
+var float oversoldEpisodeLow = na
+var float overboughtEpisodeHigh = na
+var int lastBuySeq = na
+var int lastSellSeq = na
+
+buyCooldownOK = na(lastBuySeq) or stateBarSeq - lastBuySeq > cooldownBars
+sellCooldownOK = na(lastSellSeq) or stateBarSeq - lastSellSeq > cooldownBars
+
+shortTfSessionReset = regularSessionOnly and timeframe.isintraday and (use5m or use15m) and firstEligibleSessionBar
+
+buyPendingWindowState = na(pendingBuyWindow) ? confirmWindow : pendingBuyWindow
+sellPendingWindowState = na(pendingSellWindow) ? confirmWindow : pendingSellWindow
+
+if barConfirmed
+    hardStateReset = not dataReady or (sessionOK and not shockOK) or shortTfSessionReset
+    if hardStateReset
+        strongBuyArmedSeq := na
+        strongSellArmedSeq := na
+        pendingBuySeq := na
+        pendingSellSeq := na
+        pendingBuyWindow := na
+        pendingSellWindow := na
+        pendingBuyStrongContext := false
+        pendingSellStrongContext := false
+        pendingBuyRefClose := na
+        pendingBuyRefHigh := na
+        pendingBuyExitScore := na
+        pendingBuyRefAtr := na
+        pendingBuyExtremeScore := na
+        pendingSellRefClose := na
+        pendingSellRefLow := na
+        pendingSellExitScore := na
+        pendingSellRefAtr := na
+        pendingSellExtremeScore := na
+        oversoldStrongBars := 0
+        overboughtStrongBars := 0
+        pendingBuyStrongBars := na
+        pendingSellStrongBars := na
+        oversoldEpisodeLow := na
+        overboughtEpisodeHigh := na
+
+        if shortTfSessionReset
+            lastBuySeq := na
+            lastSellSeq := na
+
+    if dataReady and sessionOK and shockOK
+        if score <= overSold
+            oversoldEpisodeLow := na(oversoldEpisodeLow) ? score : math.min(oversoldEpisodeLow, score)
+            if score <= strongOverSold
+                oversoldStrongBars += 1
+        if score >= overBought
+            overboughtEpisodeHigh := na(overboughtEpisodeHigh) ? score : math.max(overboughtEpisodeHigh, score)
+            if score >= strongOverBought
+                overboughtStrongBars += 1
+
+        if not na(strongBuyArmedSeq) and stateBarSeq - strongBuyArmedSeq > extremeLookback
+            strongBuyArmedSeq := na
+        if not na(strongSellArmedSeq) and stateBarSeq - strongSellArmedSeq > extremeLookback
+            strongSellArmedSeq := na
+
+        if not na(pendingBuySeq) and (stateBarSeq - pendingBuySeq > buyPendingWindowState or not neutral)
+            pendingBuySeq := na
+            pendingBuyWindow := na
+            pendingBuyStrongContext := false
+            pendingBuyRefClose := na
+            pendingBuyRefHigh := na
+            pendingBuyExitScore := na
+            pendingBuyRefAtr := na
+            pendingBuyExtremeScore := na
+            pendingBuyStrongBars := na
+
+        if not na(pendingSellSeq) and (stateBarSeq - pendingSellSeq > sellPendingWindowState or not neutral)
+            pendingSellSeq := na
+            pendingSellWindow := na
+            pendingSellStrongContext := false
+            pendingSellRefClose := na
+            pendingSellRefLow := na
+            pendingSellExitScore := na
+            pendingSellRefAtr := na
+            pendingSellExtremeScore := na
+            pendingSellStrongBars := na
+
+        if score >= overBought
+            strongBuyArmedSeq := na
+        if score <= overSold
+            strongSellArmedSeq := na
+
+        if enterStrongOversold and na(strongBuyArmedSeq)
+            strongBuyArmedSeq := stateBarSeq
+        if enterStrongOverbought and na(strongSellArmedSeq)
+            strongSellArmedSeq := stateBarSeq
+
+        buyArmValidNow = not na(strongBuyArmedSeq) and stateBarSeq - strongBuyArmedSeq <= extremeLookback
+        sellArmValidNow = not na(strongSellArmedSeq) and stateBarSeq - strongSellArmedSeq <= extremeLookback
+
+        if crossUpOversold and neutral
+            pendingBuySeq := stateBarSeq
+            buyExitImpulseNow = math.max(0.0, score - score[1])
+            buyExitEscapeNow = math.max(0.0, score - overSold)
+            buyFastRecoveryNow = buyExitImpulseNow >= 6.0 or (buyExitImpulseNow >= 4.0 and buyExitEscapeNow >= 2.0) or (volStress >= 1.35 and buyExitImpulseNow >= 3.0)
+            buySlowRecoveryNow = volStress <= 0.85 and buyExitImpulseNow < 3.0 and buyExitEscapeNow < 2.5
+            buyWindowAdjustNow = buyFastRecoveryNow ? -1 : buySlowRecoveryNow ? 1 : 0
+            pendingBuyWindow := confirmWindow <= 0 ? 0 : math.max(1, math.min(confirmWindow + 1, confirmWindow + buyWindowAdjustNow))
+            pendingBuyStrongContext := buyArmValidNow
+            strongBuyArmedSeq := na
+            pendingBuyRefClose := close[1]
+            pendingBuyRefHigh := high[1]
+            pendingBuyExitScore := score
+            pendingBuyRefAtr := atr
+            pendingBuyExtremeScore := na(oversoldEpisodeLow) ? score[1] : oversoldEpisodeLow
+            pendingBuyStrongBars := pendingBuyStrongContext ? math.max(1, oversoldStrongBars) : 0
+            oversoldEpisodeLow := na
+            oversoldStrongBars := 0
+
+            pendingSellSeq := na
+            pendingSellWindow := na
+            pendingSellStrongContext := false
+            pendingSellRefClose := na
+            pendingSellRefLow := na
+            pendingSellExitScore := na
+            pendingSellRefAtr := na
+            pendingSellExtremeScore := na
+            pendingSellStrongBars := na
+
+        if crossDownOverbought and neutral
+            pendingSellSeq := stateBarSeq
+            sellExitImpulseNow = math.max(0.0, score[1] - score)
+            sellExitEscapeNow = math.max(0.0, overBought - score)
+            sellFastRecoveryNow = sellExitImpulseNow >= 6.0 or (sellExitImpulseNow >= 4.0 and sellExitEscapeNow >= 2.0) or (volStress >= 1.35 and sellExitImpulseNow >= 3.0)
+            sellSlowRecoveryNow = volStress <= 0.85 and sellExitImpulseNow < 3.0 and sellExitEscapeNow < 2.5
+            sellWindowAdjustNow = sellFastRecoveryNow ? -1 : sellSlowRecoveryNow ? 1 : 0
+            pendingSellWindow := confirmWindow <= 0 ? 0 : math.max(1, math.min(confirmWindow + 1, confirmWindow + sellWindowAdjustNow))
+            pendingSellStrongContext := sellArmValidNow
+            strongSellArmedSeq := na
+            pendingSellRefClose := close[1]
+            pendingSellRefLow := low[1]
+            pendingSellExitScore := score
+            pendingSellRefAtr := atr
+            pendingSellExtremeScore := na(overboughtEpisodeHigh) ? score[1] : overboughtEpisodeHigh
+            pendingSellStrongBars := pendingSellStrongContext ? math.max(1, overboughtStrongBars) : 0
+            overboughtEpisodeHigh := na
+            overboughtStrongBars := 0
+
+            pendingBuySeq := na
+            pendingBuyWindow := na
+            pendingBuyStrongContext := false
+            pendingBuyRefClose := na
+            pendingBuyRefHigh := na
+            pendingBuyExitScore := na
+            pendingBuyRefAtr := na
+            pendingBuyExtremeScore := na
+            pendingBuyStrongBars := na
+
+        if crossUpOversold
+            oversoldEpisodeLow := na
+            oversoldStrongBars := 0
+        if crossDownOverbought
+            overboughtEpisodeHigh := na
+            overboughtStrongBars := 0
+
+        if firstValidSessionStateBar
+            sessionNeedsValidInit := false
+
+// Pending states and raw signals
+buyConfirmWindow = na(pendingBuyWindow) ? confirmWindow : pendingBuyWindow
+sellConfirmWindow = na(pendingSellWindow) ? confirmWindow : pendingSellWindow
+buyPendingValid = dataReady and neutral and not na(pendingBuySeq) and stateBarSeq - pendingBuySeq <= buyConfirmWindow
+sellPendingValid = dataReady and neutral and not na(pendingSellSeq) and stateBarSeq - pendingSellSeq <= sellConfirmWindow
+buyPendingAge = buyPendingValid ? stateBarSeq - pendingBuySeq : na
+sellPendingAge = sellPendingValid ? stateBarSeq - pendingSellSeq : na
+
+priceModuleOn = priceConfirmMode != "Off"
+
+buyPriceAnchorReady = not priceModuleOn or (not na(pendingBuyRefClose) and not na(pendingBuyRefHigh) and not na(pendingBuyRefAtr))
+sellPriceAnchorReady = not priceModuleOn or (not na(pendingSellRefClose) and not na(pendingSellRefLow) and not na(pendingSellRefAtr))
+buyAtrBuffer = not na(pendingBuyRefAtr) ? pendingBuyRefAtr * priceConfirmAtrBuffer : 0.0
+sellAtrBuffer = not na(pendingSellRefAtr) ? pendingSellRefAtr * priceConfirmAtrBuffer : 0.0
+buyConfirmLevel = priceConfirmMode == "Relaxed" ? pendingBuyRefClose + buyAtrBuffer : pendingBuyRefHigh + buyAtrBuffer
+sellConfirmLevel = priceConfirmMode == "Relaxed" ? pendingSellRefClose - sellAtrBuffer : pendingSellRefLow - sellAtrBuffer
+priceBullConfirm = not priceModuleOn or close > buyConfirmLevel
+priceBearConfirm = not priceModuleOn or close < sellConfirmLevel
+
+buyMomentumNet = momentumBars == 1 ? score - score[1] : momentumBars == 2 ? score - score[2] : score - score[3]
+sellMomentumNet = momentumBars == 1 ? score[1] - score : momentumBars == 2 ? score[2] - score : score[3] - score
+buyScoreContinuation = not useMomentumConfirm or (not na(pendingBuyExitScore) and ((buyPendingAge == 0 and allowExitBarConfirm) or score >= pendingBuyExitScore + minExitRecovery) and buyMomentumNet > minMomentumNet and score > score[1])
+sellScoreContinuation = not useMomentumConfirm or (not na(pendingSellExitScore) and ((sellPendingAge == 0 and allowExitBarConfirm) or score <= pendingSellExitScore - minExitRecovery) and sellMomentumNet > minMomentumNet and score < score[1])
+
+signalBarRange = high - low
+signalBodyAtr = atr > 0 ? math.abs(close - open) / atr : 0.0
+buyCloseLocation = signalBarRange > 0 ? (close - low) / signalBarRange : 0.5
+sellCloseLocation = signalBarRange > 0 ? (close - low) / signalBarRange : 0.5
+minConfirmBodyAtr = input.float(0.08, "Minimum confirmation candle body / ATR", minval=0.0, maxval=1.0, step=0.01, group="11B Signal quality", display=display.none)
+buyCandleConfirm = close > open and buyCloseLocation >= 0.62 and signalBodyAtr >= minConfirmBodyAtr
+sellCandleConfirm = close < open and sellCloseLocation <= 0.38 and signalBodyAtr >= minConfirmBodyAtr
+
+rawBuySignal = buyPendingValid and buyPriceAnchorReady and priceBullConfirm and buyScoreContinuation and sessionOK and shockOK and atrOK and volumeOK and dispersionOK and barConfirmed
+rawSellSignal = sellPendingValid and sellPriceAnchorReady and priceBearConfirm and sellScoreContinuation and sessionOK and shockOK and atrOK and volumeOK and dispersionOK and barConfirmed
+baseBuySignal = rawBuySignal and buyCooldownOK
+baseSellSignal = rawSellSignal and sellCooldownOK
+
+buyPriceStrengthAtr = baseBuySignal and priceModuleOn and not na(pendingBuyRefAtr) and pendingBuyRefAtr > 0 ? math.max(0.0, (close - buyConfirmLevel) / pendingBuyRefAtr) : 0.0
+sellPriceStrengthAtr = baseSellSignal and priceModuleOn and not na(pendingSellRefAtr) and pendingSellRefAtr > 0 ? math.max(0.0, (sellConfirmLevel - close) / pendingSellRefAtr) : 0.0
+
+buyTrendExcursionDepth = not na(pendingBuyExtremeScore) ? math.max(0.0, overSold - pendingBuyExtremeScore) : 0.0
+sellTrendExcursionDepth = not na(pendingSellExtremeScore) ? math.max(0.0, pendingSellExtremeScore - overBought) : 0.0
+buyRevertExcursionDepth = pendingBuyStrongContext and not na(pendingBuyExtremeScore) ? math.max(0.0, strongOverSold - pendingBuyExtremeScore) : 0.0
+sellRevertExcursionDepth = pendingSellStrongContext and not na(pendingSellExtremeScore) ? math.max(0.0, pendingSellExtremeScore - strongOverBought) : 0.0
+
+buyEscape = math.max(0.0, score - overSold)
+sellEscape = math.max(0.0, overBought - score)
+trendEscapeMin = use5m ? 2.0 : use15m ? 2.5 : use1h ? 3.0 : use4h ? 3.0 : 2.5
+revertEscapeMin = use5m ? 5.0 : use15m ? 6.0 : use1h ? 7.0 : use4h ? 7.0 : 6.0
+
+buyMacroOppose = persistentBear or htfBearStrong
+sellMacroOppose = persistentBull or htfBullStrong
+
+buyDiTrend = diPlus >= diMinus
+sellDiTrend = diMinus >= diPlus
+buyDiTurn = diPlus > diPlus[1] or diMinus < diMinus[1]
+sellDiTurn = diMinus > diMinus[1] or diPlus < diPlus[1]
+
+// Weighted recovery breadth
+buyRecoveredWeight =
+     (rsiWeight > 0 and rsiScore > rsiScore[1] ? rsiWeight : 0.0) +
+     (stochWeight > 0 and stochScore > stochScore[1] ? stochWeight : 0.0) +
+     (cciWeight > 0 and cciScore > cciScore[1] ? cciWeight : 0.0) +
+     (bbWeight > 0 and bbScore > bbScore[1] ? bbWeight : 0.0)
+
+sellRecoveredWeight =
+     (rsiWeight > 0 and rsiScore < rsiScore[1] ? rsiWeight : 0.0) +
+     (stochWeight > 0 and stochScore < stochScore[1] ? stochWeight : 0.0) +
+     (cciWeight > 0 and cciScore < cciScore[1] ? cciWeight : 0.0) +
+     (bbWeight > 0 and bbScore < bbScore[1] ? bbWeight : 0.0)
+
+buyOscBreadthRatio = weightSum > 0 ? buyRecoveredWeight / weightSum : 0.0
+sellOscBreadthRatio = weightSum > 0 ? sellRecoveredWeight / weightSum : 0.0
+// With default 35/20/20/25 weights, a 0.65 threshold requires any three oscillators to recover.
+requiredOscBreadthRatio = 0.65
+buyBreadthOK = buyOscBreadthRatio >= requiredOscBreadthRatio
+sellBreadthOK = sellOscBreadthRatio >= requiredOscBreadthRatio
+
+diSpread = math.abs(diPlus - diMinus)
+adxEasing = adx <= adx[1] or (not na(adx[2]) and adx < adx[2])
+diSpreadEasing = diSpread <= diSpread[1] or (not na(diSpread[2]) and diSpread < diSpread[2])
+trendExhaustion = adx <= 22.0 or (adxEasing and diSpreadEasing)
+
+macroBullVotes = (persistentBull ? 1 : 0) + (htfContextActive and htfBullAligned ? 1 : 0) + (macroSlopeAtr > 0.10 ? 1 : 0)
+macroBearVotes = (persistentBear ? 1 : 0) + (htfContextActive and htfBearAligned ? 1 : 0) + (macroSlopeAtr < -0.10 ? 1 : 0)
+macroBullContext = macroBullVotes >= 2 and macroBullVotes > macroBearVotes
+macroBearContext = macroBearVotes >= 2 and macroBearVotes > macroBullVotes
+
+meanErMax = use5m ? 0.42 : use15m ? 0.40 : use1h ? 0.34 : use4h ? 0.32 : 0.38
+meanHtfSpreadMax = use5m ? 0.42 : use15m ? 0.40 : use1h ? 0.34 : use4h ? 0.32 : 0.38
+macroNeutralContext = not macroBullContext and not macroBearContext and not persistentBull and not persistentBear and not htfBullStrong and not htfBearStrong and efficiencyRatio <= meanErMax and htfSpreadAtr <= meanHtfSpreadMax
+
+trendDepthMin = use5m ? 1.5 : use15m ? 1.8 : use1h ? 2.2 : use4h ? 2.5 : 2.0
+revertDepthMin = use5m ? 2.0 : use15m ? 2.5 : use1h ? 3.0 : use4h ? 3.0 : 2.5
+buyTrendDepthOK = buyTrendExcursionDepth >= trendDepthMin
+sellTrendDepthOK = sellTrendExcursionDepth >= trendDepthMin
+buyRevertDepthOK = pendingBuyStrongContext and buyRevertExcursionDepth >= revertDepthMin
+sellRevertDepthOK = pendingSellStrongContext and sellRevertExcursionDepth >= revertDepthMin
+
+buyTrendTurnOK = microBullTurn or buyDiTurn
+sellTrendTurnOK = microBearTurn or sellDiTurn
+buyTrendSupportOK = buyDiTrend or buyCandleConfirm
+sellTrendSupportOK = sellDiTrend or sellCandleConfirm
+
+buyTrendStructure = buyEscape >= trendEscapeMin and buyBreadthOK and buyTrendTurnOK and buyTrendSupportOK
+sellTrendStructure = sellEscape >= trendEscapeMin and sellBreadthOK and sellTrendTurnOK and sellTrendSupportOK
+
+buyTrendPriceReclaim = use1h or use4h ? close > microEma and close > emaFast : close > microEma
+sellTrendPriceReclaim = use1h or use4h ? close < microEma and close < emaFast : close < microEma
+
+buyRevertStructure = buyEscape >= revertEscapeMin and buyBreadthOK and trendExhaustion and buyDiTurn
+sellRevertStructure = sellEscape >= revertEscapeMin and sellBreadthOK and trendExhaustion and sellDiTurn
+buyRevertPriceReclaim = use1h or use4h ? close > emaFast : close > microEma
+sellRevertPriceReclaim = use1h or use4h ? close < emaFast : close < microEma
+
+// Trend-pullback and mean-reversion lanes
+buyTrendRegimeOK =
+     not useRegimeFilter or
+     (not regimeChaos and not regimeTrendBearStructure)
+
+sellTrendRegimeOK =
+     not useRegimeFilter or
+     (not regimeChaos and not regimeTrendBullStructure)
+
+buyTrendUserModeOK =
+     trendFilterMode == "Trend-following only" ? bullTrend :
+     trendFilterMode == "Block countertrend" ? not againstBuyTrend :
+     true
+sellTrendUserModeOK =
+     trendFilterMode == "Trend-following only" ? bearTrend :
+     trendFilterMode == "Block countertrend" ? not againstSellTrend :
+     true
+
+buyRevertUserModeOK =
+     trendFilterMode == "Trend-following only" ? false :
+     trendFilterMode == "Block countertrend" ? not againstBuyTrend :
+     true
+sellRevertUserModeOK =
+     trendFilterMode == "Trend-following only" ? false :
+     trendFilterMode == "Block countertrend" ? not againstSellTrend :
+     true
+
+buyTrendMacroOK = macroBullContext and not buyMacroOppose and (not htfContextActive or not (use1h or use4h) or htfBullAligned)
+sellTrendMacroOK = macroBearContext and not sellMacroOppose and (not htfContextActive or not (use1h or use4h) or htfBearAligned)
+
+buyTrendLane = baseBuySignal and buyTrendUserModeOK and buyTrendRegimeOK and buyTrendMacroOK and buyTrendDepthOK and buyTrendStructure and buyTrendPriceReclaim
+sellTrendLane = baseSellSignal and sellTrendUserModeOK and sellTrendRegimeOK and sellTrendMacroOK and sellTrendDepthOK and sellTrendStructure and sellTrendPriceReclaim
+
+buyRevertHtfSafe = not htfContextActive or not htfBearAligned
+sellRevertHtfSafe = not htfContextActive or not htfBullAligned
+
+useRevertTrendResidualGuard = input.bool(true, "Mean-reversion residual-trend guard", group="11C Recovery guards", display=display.none)
+revertTrendMemoryBars = use5m ? 6 : use15m ? 5 : use1h ? 3 : use4h ? 2 : 5
+revertMacroSlopeLimit = input.float(0.12, "Residual guard: maximum opposing macro EMA slope / ATR", minval=0.0, maxval=1.0, step=0.01, group="11C Recovery guards", display=display.none)
+revertSlowSlopeLimit = input.float(0.18, "Residual guard: maximum opposing slow EMA slope / ATR", minval=0.0, maxval=1.0, step=0.01, group="11C Recovery guards", display=display.none)
+
+barsSinceMacroBear = nz(ta.barssince(macroBearContext), 100000)
+barsSinceMacroBull = nz(ta.barssince(macroBullContext), 100000)
+barsSinceHtfBearStrong = nz(ta.barssince(htfBearStrong), 100000)
+barsSinceHtfBullStrong = nz(ta.barssince(htfBullStrong), 100000)
+
+buyRevertTrendMemorySafe = barsSinceMacroBear >= revertTrendMemoryBars and barsSinceHtfBearStrong >= revertTrendMemoryBars
+sellRevertTrendMemorySafe = barsSinceMacroBull >= revertTrendMemoryBars and barsSinceHtfBullStrong >= revertTrendMemoryBars
+buyRevertSlopeSafe = macroSlopeAtr >= -revertMacroSlopeLimit and (na(emaSlowSlopeAtr) or emaSlowSlopeAtr >= -revertSlowSlopeLimit)
+sellRevertSlopeSafe = macroSlopeAtr <= revertMacroSlopeLimit and (na(emaSlowSlopeAtr) or emaSlowSlopeAtr <= revertSlowSlopeLimit)
+
+buyRevertResidualSafe = not useRevertTrendResidualGuard or (buyRevertTrendMemorySafe and buyRevertSlopeSafe)
+sellRevertResidualSafe = not useRevertTrendResidualGuard or (sellRevertTrendMemorySafe and sellRevertSlopeSafe)
+
+buyRevertEnvironment = macroNeutralContext and buyRevertHtfSafe and buyRevertResidualSafe and (
+     not useRegimeFilter or
+     regimeRangeStable or
+     (allowTransitionSignals and not use1h and not use4h and regimeTransition and buyRevertExcursionDepth >= revertDepthMin + 2.0 and trendExhaustion)
+)
+sellRevertEnvironment = macroNeutralContext and sellRevertHtfSafe and sellRevertResidualSafe and (
+     not useRegimeFilter or
+     regimeRangeStable or
+     (allowTransitionSignals and not use1h and not use4h and regimeTransition and sellRevertExcursionDepth >= revertDepthMin + 2.0 and trendExhaustion)
+)
+
+buyRevertLane = baseBuySignal and buyRevertUserModeOK and pendingBuyStrongContext and buyRevertEnvironment and buyRevertDepthOK and buyRevertStructure and buyRevertPriceReclaim
+sellRevertLane = baseSellSignal and sellRevertUserModeOK and pendingSellStrongContext and sellRevertEnvironment and sellRevertDepthOK and sellRevertStructure and sellRevertPriceReclaim
+
+// Recovery guards
+useRecoveryGuard = input.bool(true, "Reversal confirmation guard", group="11C Recovery guards", display=display.none)
+recoveryMaxExtension = input.float(1.0, "Maximum confirmation price distance from micro EMA in ATR", minval=0.2, maxval=3.0, step=0.1, group="11C Recovery guards", display=display.none)
+recoveryMaxBarAtr = input.float(1.8, "Maximum confirmation bar true range / previous ATR", minval=0.5, maxval=5.0, step=0.1, group="11C Recovery guards", display=display.none)
+
+useRevertStabilityGuard = input.bool(true, "Mean-reversion recovery stability guard", group="11C Recovery guards", display=display.none)
+revertMinHoldBars = input.int(1, "Minimum stable bars after zone exit", minval=1, maxval=3, group="11C Recovery guards", display=display.none)
+revertHoldBuffer = input.float(1.0, "Minimum stable-confirmation score buffer beyond the normal threshold", minval=0.0, maxval=10.0, step=0.5, group="11C Recovery guards", display=display.none)
+
+buyRecoveryExtension = atr > 0 ? math.max(0.0, close - microEma) / atr : na
+sellRecoveryExtension = atr > 0 ? math.max(0.0, microEma - close) / atr : na
+buyRevertRecoveryGuardOK = not useRecoveryGuard or (buyCandleConfirm and microBullTurn and score < 50.0 and not na(buyRecoveryExtension) and buyRecoveryExtension <= recoveryMaxExtension and not na(shockRatio) and shockRatio <= recoveryMaxBarAtr)
+sellRevertRecoveryGuardOK = not useRecoveryGuard or (sellCandleConfirm and microBearTurn and score > 50.0 and not na(sellRecoveryExtension) and sellRecoveryExtension <= recoveryMaxExtension and not na(shockRatio) and shockRatio <= recoveryMaxBarAtr)
+
+buyRevertHeldScore = ta.lowest(score[1], revertMinHoldBars)
+sellRevertHeldScore = ta.highest(score[1], revertMinHoldBars)
+buyRevertStabilityOK = not useRevertStabilityGuard or (not na(buyPendingAge) and buyPendingAge >= revertMinHoldBars and not na(buyRevertHeldScore) and buyRevertHeldScore > overSold and score >= overSold + revertHoldBuffer)
+sellRevertStabilityOK = not useRevertStabilityGuard or (not na(sellPendingAge) and sellPendingAge >= revertMinHoldBars and not na(sellRevertHeldScore) and sellRevertHeldScore < overBought and score <= overBought - revertHoldBuffer)
+
+// Lane-specific quality and arbitration
+
+// Shared quality components
+buyExitRecovery = not na(pendingBuyExitScore) ? math.max(0.0, score - pendingBuyExitScore) : 0.0
+sellExitRecovery = not na(pendingSellExitScore) ? math.max(0.0, pendingSellExitScore - score) : 0.0
+
+buyPriceSoft = not priceModuleOn ? na : 0.40 + 0.60 * math.min(1.0, buyPriceStrengthAtr / 0.35)
+sellPriceSoft = not priceModuleOn ? na : 0.40 + 0.60 * math.min(1.0, sellPriceStrengthAtr / 0.35)
+
+buyMomentumExcess = math.min(1.0, math.max(0.0, buyMomentumNet - minMomentumNet) / 4.0 + math.max(0.0, buyExitRecovery - minExitRecovery) / 6.0)
+sellMomentumExcess = math.min(1.0, math.max(0.0, sellMomentumNet - minMomentumNet) / 4.0 + math.max(0.0, sellExitRecovery - minExitRecovery) / 6.0)
+buyMomentumSoft = not useMomentumConfirm ? na : 0.40 + 0.60 * buyMomentumExcess
+sellMomentumSoft = not useMomentumConfirm ? na : 0.40 + 0.60 * sellMomentumExcess
+
+buyBreadthSoft = 0.50 + 0.50 * math.max(0.0, math.min(1.0, (buyOscBreadthRatio - requiredOscBreadthRatio) / math.max(0.01, 1.0 - requiredOscBreadthRatio)))
+sellBreadthSoft = 0.50 + 0.50 * math.max(0.0, math.min(1.0, (sellOscBreadthRatio - requiredOscBreadthRatio) / math.max(0.01, 1.0 - requiredOscBreadthRatio)))
+
+buyTimingSoft = na(buyPendingAge) ? 0.0 : buyConfirmWindow <= 0 ? 1.0 : math.max(0.40, 1.0 - 0.60 * math.min(1.0, buyPendingAge * 1.0 / buyConfirmWindow))
+sellTimingSoft = na(sellPendingAge) ? 0.0 : sellConfirmWindow <= 0 ? 1.0 : math.max(0.40, 1.0 - 0.60 * math.min(1.0, sellPendingAge * 1.0 / sellConfirmWindow))
+
+dispersionSoft = not useDispersionFilter or na(oscDispersion) ? na : 0.40 + 0.60 * math.max(0.0, math.min(1.0, (maxDispersion - oscDispersion) / math.max(1.0, maxDispersion)))
+
+volumeSoft = not useVolumeFilter or not hasVolume ? na : 0.40 + 0.60 * math.max(0.0, math.min(1.0, (rvol - minRVOL) / math.max(0.25, 2.0 - minRVOL)))
+
+// No penalty up to 1.10x; approximately one point per additional 0.05x, capped at 12 points.
+volPenalty = not useAtrFilter or atrFilterMode != "Relative volatility" ? 0.0 : math.min(12.0, math.max(0.0, (volStress - 1.10) * 20.0))
+
+buyTrendModePenalty = trendFilterMode == "Quality penalty" and againstBuyTrend ? 6.0 : 0.0
+sellTrendModePenalty = trendFilterMode == "Quality penalty" and againstSellTrend ? 6.0 : 0.0
+buyRevertModePenalty = trendFilterMode == "Quality penalty" and againstBuyTrend ? 9.0 : 0.0
+sellRevertModePenalty = trendFilterMode == "Quality penalty" and againstSellTrend ? 9.0 : 0.0
+
+// Trend-pullback quality
+buyTrendMacroSoft = ((persistentBull ? 1.0 : 0.0) + (macroSlopeAtr > 0.10 ? 1.0 : 0.0)) / 2.0
+sellTrendMacroSoft = ((persistentBear ? 1.0 : 0.0) + (macroSlopeAtr < -0.10 ? 1.0 : 0.0)) / 2.0
+ 
+buyTrendHtfSoft = not htfContextActive ? na : htfBullStrong ? 1.0 : htfBullAligned ? 0.70 : htfBull ? 0.45 : 0.0
+sellTrendHtfSoft = not htfContextActive ? na : htfBearStrong ? 1.0 : htfBearAligned ? 0.70 : htfBear ? 0.45 : 0.0
+
+buyTrendRegimeSoft =
+     not useRegimeFilter ? na :
+     regimeTrendBullStructure ? (regimeTrendStable ? 1.00 : 0.90) :
+     regimeTrendBearStructure ? 0.00 :
+     regimeTransition ? 0.65 :
+     regimeRange ? 0.55 :
+     regimeTrend ? 0.45 : 0.35
+
+sellTrendRegimeSoft =
+     not useRegimeFilter ? na :
+     regimeTrendBearStructure ? (regimeTrendStable ? 1.00 : 0.90) :
+     regimeTrendBullStructure ? 0.00 :
+     regimeTransition ? 0.65 :
+     regimeRange ? 0.55 :
+     regimeTrend ? 0.45 : 0.35
+
+buyTrendDepthSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (buyTrendExcursionDepth - trendDepthMin) / 6.0))
+sellTrendDepthSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (sellTrendExcursionDepth - trendDepthMin) / 6.0))
+
+buyTrendStructureSoft = ((microBullTurn ? 1.0 : 0.0) + (buyDiTrend ? 1.0 : 0.0) + (buyCandleConfirm ? 1.0 : 0.0)) / 3.0
+sellTrendStructureSoft = ((microBearTurn ? 1.0 : 0.0) + (sellDiTrend ? 1.0 : 0.0) + (sellCandleConfirm ? 1.0 : 0.0)) / 3.0
+
+float buyTrendQNum = 0.0
+float buyTrendQDen = 0.0
+float sellTrendQNum = 0.0
+float sellTrendQDen = 0.0
+
+buyTrendQNum += 12.0 * buyTrendMacroSoft
+buyTrendQDen += 12.0
+sellTrendQNum += 12.0 * sellTrendMacroSoft
+sellTrendQDen += 12.0
+
+buyTrendQNum += 8.0 * buyTrendDepthSoft
+buyTrendQDen += 8.0
+sellTrendQNum += 8.0 * sellTrendDepthSoft
+sellTrendQDen += 8.0
+
+buyTrendQNum += 8.0 * buyTrendStructureSoft
+buyTrendQDen += 8.0
+sellTrendQNum += 8.0 * sellTrendStructureSoft 
+sellTrendQDen += 8.0
+
+buyTrendQNum += 6.0 * buyBreadthSoft
+buyTrendQDen += 6.0
+sellTrendQNum += 6.0 * sellBreadthSoft
+sellTrendQDen += 6.0
+
+buyTrendQNum += 12.0 * buyTimingSoft
+buyTrendQDen += 12.0
+sellTrendQNum += 12.0 * sellTimingSoft
+sellTrendQDen += 12.0
+
+if htfContextActive
+    buyTrendQNum += 12.0 * nz(buyTrendHtfSoft, 0.0)
+    buyTrendQDen += 12.0
+    sellTrendQNum += 12.0 * nz(sellTrendHtfSoft, 0.0)
+    sellTrendQDen += 12.0
+
+if useRegimeFilter
+    buyTrendQNum += 10.0 * nz(buyTrendRegimeSoft, 0.0)
+    buyTrendQDen += 10.0
+    sellTrendQNum += 10.0 * nz(sellTrendRegimeSoft, 0.0)
+    sellTrendQDen += 10.0
+
+if priceModuleOn
+    buyTrendQNum += 12.0 * nz(buyPriceSoft, 0.0)
+    buyTrendQDen += 12.0
+    sellTrendQNum += 12.0 * nz(sellPriceSoft, 0.0)
+    sellTrendQDen += 12.0
+
+if useMomentumConfirm
+    buyTrendQNum += 12.0 * nz(buyMomentumSoft, 0.0)
+    buyTrendQDen += 12.0
+    sellTrendQNum += 12.0 * nz(sellMomentumSoft, 0.0)
+    sellTrendQDen += 12.0
+
+if useDispersionFilter
+    buyTrendQNum += 8.0 * nz(dispersionSoft, 0.0)
+    buyTrendQDen += 8.0
+    sellTrendQNum += 8.0 * nz(dispersionSoft, 0.0)
+    sellTrendQDen += 8.0
+
+if useVolumeFilter and hasVolume
+    buyTrendQNum += 6.0 * nz(volumeSoft, 0.0)
+    buyTrendQDen += 6.0
+    sellTrendQNum += 6.0 * nz(volumeSoft, 0.0)
+    sellTrendQDen += 6.0
+
+buyTrendQualityRaw = buyTrendQDen > 0 ? 100.0 * buyTrendQNum / buyTrendQDen : 0.0
+sellTrendQualityRaw = sellTrendQDen > 0 ? 100.0 * sellTrendQNum / sellTrendQDen : 0.0
+
+buyTrendCoreMin = math.min(math.min(buyTrendMacroSoft, buyTrendDepthSoft), math.min(buyTrendStructureSoft, buyBreadthSoft))
+sellTrendCoreMin = math.min(math.min(sellTrendMacroSoft, sellTrendDepthSoft), math.min(sellTrendStructureSoft, sellBreadthSoft))
+buyTrendWeakPenalty = 4.0 * math.max(0.0, math.min(1.0, (0.55 - buyTrendCoreMin) / 0.15))
+sellTrendWeakPenalty = 4.0 * math.max(0.0, math.min(1.0, (0.55 - sellTrendCoreMin) / 0.15))
+buyTrendBalanceBonus = 2.0 * math.max(0.0, math.min(1.0, (buyTrendCoreMin - 0.72) / 0.18))
+sellTrendBalanceBonus = 2.0 * math.max(0.0, math.min(1.0, (sellTrendCoreMin - 0.72) / 0.18))
+
+buyTrendQuality = math.max(0.0, math.min(100.0, buyTrendQualityRaw - volPenalty - buyTrendModePenalty - buyTrendWeakPenalty + buyTrendBalanceBonus))
+sellTrendQuality = math.max(0.0, math.min(100.0, sellTrendQualityRaw - volPenalty - sellTrendModePenalty - sellTrendWeakPenalty + sellTrendBalanceBonus))
+
+// Mean-reversion quality
+buyRevertDepthSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (buyRevertExcursionDepth - revertDepthMin) / 6.0))
+sellRevertDepthSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (sellRevertExcursionDepth - revertDepthMin) / 6.0))
+
+revertDwellTarget = use5m ? 3.0 : 2.0
+buyRevertDwellSoft = not pendingBuyStrongContext or na(pendingBuyStrongBars) ? 0.0 : 0.40 + 0.60 * math.min(1.0, pendingBuyStrongBars / revertDwellTarget)
+sellRevertDwellSoft = not pendingSellStrongContext or na(pendingSellStrongBars) ? 0.0 : 0.40 + 0.60 * math.min(1.0, pendingSellStrongBars / revertDwellTarget)
+
+revertAdxSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (regimeRangeAdx - adx) / math.max(5.0, regimeRangeAdx - 10.0)))
+revertSpreadSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (regimeMaxRangeSpreadAtr - regimeEmaSpreadAtr) / math.max(0.05, regimeMaxRangeSpreadAtr)))
+revertErSoft = 0.40 + 0.60 * math.max(0.0, math.min(1.0, (meanErMax - efficiencyRatio) / math.max(0.05, meanErMax)))
+revertRangeCoreSoft = (revertAdxSoft + revertSpreadSoft + revertErSoft) / 3.0
+revertRangeSoft = regimeRangeStable ? revertRangeCoreSoft : regimeRange ? revertRangeCoreSoft * 0.80 : regimeTransition ? revertRangeCoreSoft * 0.45 : 0.0
+
+revertExhaustSoft = trendExhaustion ? (adx <= 20.0 ? 1.0 : 0.75) : 0.0
+
+buyMicroSlopeAtr = atr > 0 ? math.max(0.0, microEma - microEma[1]) / atr : 0.0
+sellMicroSlopeAtr = atr > 0 ? math.max(0.0, microEma[1] - microEma) / atr : 0.0
+buyMicroReclaimAtr = atr > 0 ? math.max(0.0, close - microEma) / atr : 0.0
+sellMicroReclaimAtr = atr > 0 ? math.max(0.0, microEma - close) / atr : 0.0
+
+buyRevertMicroSoft = microBullTurn ? 0.40 + 0.60 * ((math.min(1.0, buyMicroSlopeAtr / 0.08) + math.min(1.0, buyMicroReclaimAtr / 0.35)) / 2.0) : 0.0
+sellRevertMicroSoft = microBearTurn ? 0.40 + 0.60 * ((math.min(1.0, sellMicroSlopeAtr / 0.08) + math.min(1.0, sellMicroReclaimAtr / 0.35)) / 2.0) : 0.0
+
+buyDiTurnStrength = math.max(0.0, diPlus - diPlus[1]) + math.max(0.0, diMinus[1] - diMinus)
+sellDiTurnStrength = math.max(0.0, diMinus - diMinus[1]) + math.max(0.0, diPlus[1] - diPlus)
+buyRevertDiSoft = buyDiTurn ? 0.40 + 0.60 * math.min(1.0, buyDiTurnStrength / 6.0) : 0.0
+sellRevertDiSoft = sellDiTurn ? 0.40 + 0.60 * math.min(1.0, sellDiTurnStrength / 6.0) : 0.0
+
+buyCandleBodyExcess = math.max(0.0, signalBodyAtr - minConfirmBodyAtr)
+sellCandleBodyExcess = buyCandleBodyExcess
+buyCandleLocationExcess = math.max(0.0, buyCloseLocation - 0.62) / 0.38
+sellCandleLocationExcess = math.max(0.0, 0.38 - sellCloseLocation) / 0.38
+buyRevertCandleSoft = buyCandleConfirm ? 0.40 + 0.60 * ((math.min(1.0, buyCandleBodyExcess / 0.50) + math.min(1.0, buyCandleLocationExcess)) / 2.0) : 0.0
+sellRevertCandleSoft = sellCandleConfirm ? 0.40 + 0.60 * ((math.min(1.0, sellCandleBodyExcess / 0.50) + math.min(1.0, sellCandleLocationExcess)) / 2.0) : 0.0
+
+buyRevertStructureSoft = (buyRevertMicroSoft + buyRevertDiSoft + buyRevertCandleSoft) / 3.0
+sellRevertStructureSoft = (sellRevertMicroSoft + sellRevertDiSoft + sellRevertCandleSoft) / 3.0
+
+float buyRevertQNum = 0.0
+float buyRevertQDen = 0.0
+float sellRevertQNum = 0.0
+float sellRevertQDen = 0.0
+
+buyRevertQNum += 10.0 * buyRevertDepthSoft
+buyRevertQDen += 10.0
+sellRevertQNum += 10.0 * sellRevertDepthSoft
+sellRevertQDen += 10.0
+
+buyRevertQNum += 8.0 * buyRevertDwellSoft
+buyRevertQDen += 8.0
+sellRevertQNum += 8.0 * sellRevertDwellSoft
+sellRevertQDen += 8.0
+
+if useRegimeFilter
+    buyRevertQNum += 12.0 * revertRangeSoft
+    buyRevertQDen += 12.0
+    sellRevertQNum += 12.0 * revertRangeSoft
+    sellRevertQDen += 12.0
+
+buyRevertQNum += 8.0 * revertExhaustSoft
+buyRevertQDen += 8.0
+sellRevertQNum += 8.0 * revertExhaustSoft
+sellRevertQDen += 8.0
+
+buyRevertQNum += 10.0 * buyRevertStructureSoft
+buyRevertQDen += 10.0
+sellRevertQNum += 10.0 * sellRevertStructureSoft
+sellRevertQDen += 10.0
+
+buyRevertQNum += 6.0 * buyBreadthSoft
+buyRevertQDen += 6.0
+sellRevertQNum += 6.0 * sellBreadthSoft
+sellRevertQDen += 6.0
+
+buyRevertQNum += 10.0 * buyTimingSoft
+buyRevertQDen += 10.0
+sellRevertQNum += 10.0 * sellTimingSoft
+sellRevertQDen += 10.0
+
+if priceModuleOn
+    buyRevertQNum += 10.0 * nz(buyPriceSoft, 0.0)
+    buyRevertQDen += 10.0
+    sellRevertQNum += 10.0 * nz(sellPriceSoft, 0.0)
+    sellRevertQDen += 10.0
+
+if useMomentumConfirm
+    buyRevertQNum += 10.0 * nz(buyMomentumSoft, 0.0)
+    buyRevertQDen += 10.0
+    sellRevertQNum += 10.0 * nz(sellMomentumSoft, 0.0)
+    sellRevertQDen += 10.0
+
+if useDispersionFilter
+    buyRevertQNum += 8.0 * nz(dispersionSoft, 0.0)
+    buyRevertQDen += 8.0
+    sellRevertQNum += 8.0 * nz(dispersionSoft, 0.0)
+    sellRevertQDen += 8.0
+
+if useVolumeFilter and hasVolume
+    buyRevertQNum += 5.0 * nz(volumeSoft, 0.0)
+    buyRevertQDen += 5.0
+    sellRevertQNum += 5.0 * nz(volumeSoft, 0.0)
+    sellRevertQDen += 5.0
+
+buyRevertQualityRaw = buyRevertQDen > 0 ? 100.0 * buyRevertQNum / buyRevertQDen : 0.0
+sellRevertQualityRaw = sellRevertQDen > 0 ? 100.0 * sellRevertQNum / sellRevertQDen : 0.0
+
+buyRevertCoreBaseMin = math.min(math.min(buyRevertDepthSoft, revertExhaustSoft), math.min(buyRevertStructureSoft, buyBreadthSoft))
+sellRevertCoreBaseMin = math.min(math.min(sellRevertDepthSoft, revertExhaustSoft), math.min(sellRevertStructureSoft, sellBreadthSoft))
+buyRevertCoreMin = useRegimeFilter ? math.min(buyRevertCoreBaseMin, revertRangeSoft) : buyRevertCoreBaseMin
+sellRevertCoreMin = useRegimeFilter ? math.min(sellRevertCoreBaseMin, revertRangeSoft) : sellRevertCoreBaseMin
+buyRevertWeakPenalty = 4.0 * math.max(0.0, math.min(1.0, (0.52 - buyRevertCoreMin) / 0.12))
+sellRevertWeakPenalty = 4.0 * math.max(0.0, math.min(1.0, (0.52 - sellRevertCoreMin) / 0.12))
+buyRevertBalanceBonus = 2.0 * math.max(0.0, math.min(1.0, (buyRevertCoreMin - 0.70) / 0.20))
+sellRevertBalanceBonus = 2.0 * math.max(0.0, math.min(1.0, (sellRevertCoreMin - 0.70) / 0.20))
+
+buyRevertQuality = math.max(0.0, math.min(100.0, buyRevertQualityRaw - volPenalty - buyRevertModePenalty - buyRevertWeakPenalty + buyRevertBalanceBonus))
+sellRevertQuality = math.max(0.0, math.min(100.0, sellRevertQualityRaw - volPenalty - sellRevertModePenalty - sellRevertWeakPenalty + sellRevertBalanceBonus))
+
+customMinSignalQ = input.float(64.0, "Custom: minimum signal Q", minval=40.0, maxval=90.0, step=1.0, group="11B Signal quality", display=display.none)
+trendMinSignalQ = use5m ? 58.0 : use15m ? 58.0 : use1h ? 62.0 : use4h ? 64.0 : customMinSignalQ
+revertMinSignalQ = use5m ? 64.0 : use15m ? 66.0 : use1h ? 70.0 : use4h ? 72.0 : math.min(96.0, customMinSignalQ + 6.0)
+
+buyAgeOK = not na(buyPendingAge) and buyPendingAge <= buyConfirmWindow
+sellAgeOK = not na(sellPendingAge) and sellPendingAge <= sellConfirmWindow
+
+buyTrendPass = buyTrendLane and buyAgeOK and buyTrendQuality >= trendMinSignalQ
+sellTrendPass = sellTrendLane and sellAgeOK and sellTrendQuality >= trendMinSignalQ
+
+buyRevertPass = buyRevertLane and buyAgeOK and buyRevertQuality >= revertMinSignalQ and buyRevertRecoveryGuardOK and buyRevertStabilityOK
+sellRevertPass = sellRevertLane and sellAgeOK and sellRevertQuality >= revertMinSignalQ and sellRevertRecoveryGuardOK and sellRevertStabilityOK
+
+buyTrendMargin = buyTrendQuality - trendMinSignalQ
+buyRevertMargin = buyRevertQuality - revertMinSignalQ
+sellTrendMargin = sellTrendQuality - trendMinSignalQ
+sellRevertMargin = sellRevertQuality - revertMinSignalQ
+
+buyTrendMarginNorm = buyTrendPass ? math.max(0.0, buyTrendMargin) / math.max(1.0, 100.0 - trendMinSignalQ) : -1.0
+buyRevertMarginNorm = buyRevertPass ? math.max(0.0, buyRevertMargin) / math.max(1.0, 100.0 - revertMinSignalQ) : -1.0
+sellTrendMarginNorm = sellTrendPass ? math.max(0.0, sellTrendMargin) / math.max(1.0, 100.0 - trendMinSignalQ) : -1.0
+sellRevertMarginNorm = sellRevertPass ? math.max(0.0, sellRevertMargin) / math.max(1.0, 100.0 - revertMinSignalQ) : -1.0
+
+arbitrationEps = 0.000001
+
+int buySelectedLane = 0
+if buyTrendPass and buyRevertPass
+    if buyTrendMarginNorm > buyRevertMarginNorm + arbitrationEps
+        buySelectedLane := 1
+    else if buyRevertMarginNorm > buyTrendMarginNorm + arbitrationEps
+        buySelectedLane := 2
+    else if buyTrendMargin > buyRevertMargin + arbitrationEps
+        buySelectedLane := 1
+    else if buyRevertMargin > buyTrendMargin + arbitrationEps
+        buySelectedLane := 2
+    else
+        buySelectedLane := buyTrendQuality >= buyRevertQuality ? 1 : 2
+else if buyTrendPass
+    buySelectedLane := 1
+else if buyRevertPass
+    buySelectedLane := 2
+
+int sellSelectedLane = 0
+if sellTrendPass and sellRevertPass
+    if sellTrendMarginNorm > sellRevertMarginNorm + arbitrationEps
+        sellSelectedLane := 1
+    else if sellRevertMarginNorm > sellTrendMarginNorm + arbitrationEps
+        sellSelectedLane := 2
+    else if sellTrendMargin > sellRevertMargin + arbitrationEps
+        sellSelectedLane := 1
+    else if sellRevertMargin > sellTrendMargin + arbitrationEps
+        sellSelectedLane := 2
+    else
+        sellSelectedLane := sellTrendQuality >= sellRevertQuality ? 1 : 2
+else if sellTrendPass
+    sellSelectedLane := 1
+else if sellRevertPass
+    sellSelectedLane := 2
+
+buySelectedTrend = buySelectedLane == 1
+buySelectedRevert = buySelectedLane == 2
+sellSelectedTrend = sellSelectedLane == 1
+sellSelectedRevert = sellSelectedLane == 2
+
+buyLaneOK = buySelectedLane != 0
+sellLaneOK = sellSelectedLane != 0
+
+buyQuality = buySelectedTrend ? buyTrendQuality : buySelectedRevert ? buyRevertQuality : 0.0
+sellQuality = sellSelectedTrend ? sellTrendQuality : sellSelectedRevert ? sellRevertQuality : 0.0
+
+buyRequiredQ = buySelectedTrend ? trendMinSignalQ : buySelectedRevert ? revertMinSignalQ : na
+sellRequiredQ = sellSelectedTrend ? trendMinSignalQ : sellSelectedRevert ? revertMinSignalQ : na
+
+buyLaneRecoveryOK = buySelectedTrend ? true : buySelectedRevert ? (buyRevertRecoveryGuardOK and buyRevertStabilityOK) : false
+sellLaneRecoveryOK = sellSelectedTrend ? true : sellSelectedRevert ? (sellRevertRecoveryGuardOK and sellRevertStabilityOK) : false
+
+buyBaseQualityOK = buyLaneOK and buyAgeOK and buyQuality >= buyRequiredQ and buyLaneRecoveryOK
+sellBaseQualityOK = sellLaneOK and sellAgeOK and sellQuality >= sellRequiredQ and sellLaneRecoveryOK
+
+// Enhanced recovery signals
+strongSignalFloorQ = input.float(78.0, "BUY+/SELL+ minimum absolute Q", minval=60.0, maxval=98.0, step=1.0, group="11B Enhanced signal quality", display=display.none)
+strongSignalProgressMin = input.float(0.45, "BUY+/SELL+ minimum normalized excess quality", minval=0.10, maxval=0.90, step=0.05, group="11B Enhanced signal quality", display=display.none)
+
+buySelectedMarginNorm = buySelectedTrend ? buyTrendMarginNorm : buySelectedRevert ? buyRevertMarginNorm : -1.0
+sellSelectedMarginNorm = sellSelectedTrend ? sellTrendMarginNorm : sellSelectedRevert ? sellRevertMarginNorm : -1.0
+
+trendStrongMacroRequired = htfContextActive ? 3 : 2
+
+buyTrendStrongContext =
+     buySelectedTrend and
+     macroBullVotes >= trendStrongMacroRequired and
+     buyOscBreadthRatio >= 0.90 and
+     buyTrendStructureSoft >= 0.66 and
+     (not htfContextActive or not (use1h or use4h) or htfBullAligned)
+
+sellTrendStrongContext =
+     sellSelectedTrend and
+     macroBearVotes >= trendStrongMacroRequired and
+     sellOscBreadthRatio >= 0.90 and
+     sellTrendStructureSoft >= 0.66 and
+     (not htfContextActive or not (use1h or use4h) or htfBearAligned)
+
+buyRevertStrongContext =
+     buySelectedRevert and
+     (not useRegimeFilter or regimeRangeStable) and
+     buyRevertExcursionDepth >= revertDepthMin + 2.0 and
+     nz(pendingBuyStrongBars, 0) >= 2 and
+     buyOscBreadthRatio >= 0.90 and
+     buyRevertStructureSoft >= 0.66
+
+sellRevertStrongContext =
+     sellSelectedRevert and
+     (not useRegimeFilter or regimeRangeStable) and
+     sellRevertExcursionDepth >= revertDepthMin + 2.0 and
+     nz(pendingSellStrongBars, 0) >= 2 and
+     sellOscBreadthRatio >= 0.90 and
+     sellRevertStructureSoft >= 0.66
+
+strongBuySignal = buyBaseQualityOK and buyQuality >= strongSignalFloorQ and buySelectedMarginNorm >= strongSignalProgressMin and (buyTrendStrongContext or buyRevertStrongContext)
+buySignal = buyBaseQualityOK and not strongBuySignal
+strongSellSignal = sellBaseQualityOK and sellQuality >= strongSignalFloorQ and sellSelectedMarginNorm >= strongSignalProgressMin and (sellTrendStrongContext or sellRevertStrongContext)
+sellSignal = sellBaseQualityOK and not strongSellSignal
+
+anyBuySignal = strongBuySignal or buySignal
+anySellSignal = strongSellSignal or sellSignal
+anySignal = anyBuySignal or anySellSignal
+
+signalQ = anyBuySignal ? buyQuality : anySellSignal ? sellQuality : na
+signalName = strongBuySignal ? "Enhanced upward recovery" : buySignal ? "Upward recovery confirmed" : strongSellSignal ? "Enhanced downward recovery" : sellSignal ? "Downward recovery confirmed" : "-"
+signalLaneCode = anyBuySignal ? buySelectedLane : anySellSignal ? sellSelectedLane : 0
+
+// Consume confirmed signal state
+if anyBuySignal
+    lastBuySeq := stateBarSeq
+    strongBuyArmedSeq := na
+    pendingBuySeq := na
+    pendingSellSeq := na
+    pendingBuyWindow := na
+    pendingSellWindow := na
+    pendingBuyStrongContext := false
+    pendingSellStrongContext := false
+    pendingBuyRefClose := na
+    pendingBuyRefHigh := na
+    pendingBuyExitScore := na
+    pendingBuyRefAtr := na
+    pendingBuyExtremeScore := na
+    pendingBuyStrongBars := na
+    pendingSellRefClose := na
+    pendingSellRefLow := na
+    pendingSellExitScore := na
+    pendingSellRefAtr := na
+    pendingSellExtremeScore := na
+    pendingSellStrongBars := na
+
+if anySellSignal
+    lastSellSeq := stateBarSeq
+    strongSellArmedSeq := na
+    pendingBuySeq := na
+    pendingSellSeq := na
+    pendingBuyWindow := na
+    pendingSellWindow := na
+    pendingBuyStrongContext := false
+    pendingSellStrongContext := false
+    pendingBuyRefClose := na
+    pendingBuyRefHigh := na
+    pendingBuyExitScore := na
+    pendingBuyRefAtr := na
+    pendingBuyExtremeScore := na
+    pendingBuyStrongBars := na
+    pendingSellRefClose := na
+    pendingSellRefLow := na
+    pendingSellExitScore := na
+    pendingSellRefAtr := na
+    pendingSellExtremeScore := na
+    pendingSellStrongBars := na
+
+// Convergence background (visual only)
+showConvergenceBg = input.bool(true, "Show convergence background", group="12 Appearance", display=display.none)
+convergenceLookback = input.int(40, "Convergence baseline length", minval=20, maxval=120, group="12 Appearance", display=display.none)
+convergenceRatio = input.float(0.88, "Convergence threshold", minval=0.60, maxval=1.00, step=0.01, group="12 Appearance", display=display.none)
+convergenceMinVotes = input.int(2, "Minimum convergence votes", minval=2, maxval=3, group="12 Appearance", display=display.none)
+
+convBbWidth = not na(basis) and math.abs(basis) > 0 ? bbRange / math.abs(basis) : na
+convBbBase = ta.ema(convBbWidth, convergenceLookback)
+
+convAtrBase = ta.ema(atrPct, convergenceLookback)
+
+convEmaSpread = atr > 0 ? math.abs(emaFast - emaSlow) / atr : na
+convEmaSpreadBase = ta.ema(convEmaSpread, convergenceLookback)
+
+convBbTight = not na(convBbWidth) and not na(convBbBase) and convBbBase > 0 and convBbWidth <= convBbBase * convergenceRatio
+convAtrTight = not na(atrPct) and not na(convAtrBase) and convAtrBase > 0 and atrPct <= convAtrBase * convergenceRatio
+convEmaTight = not na(convEmaSpread) and not na(convEmaSpreadBase) and convEmaSpreadBase > 0 and convEmaSpread <= convEmaSpreadBase * convergenceRatio
+
+convVotes = (convBbTight ? 1 : 0) + (convAtrTight ? 1 : 0) + (convEmaTight ? 1 : 0)
+convergenceRaw = convVotes >= convergenceMinVotes and not regimeChaos
+convergenceHold = ta.sma(convergenceRaw ? 1.0 : 0.0, 3) >= 0.67
+convergenceActive = showConvergenceBg and convergenceHold
+
+// Display
+
+uiBg = color.rgb(7, 7, 7)
+bgcolor(uiBg, title="OBOS background")
+
+uiConvergenceYellow = color.rgb(196, 151, 46)
+bgcolor(convergenceActive ? color.new(uiConvergenceYellow, 86) : na, title="Convergence background")
+
+uiLineNeutral = color.rgb(222, 224, 226)
+uiRed = color.rgb(255, 59, 76)
+uiGreen = color.rgb(0, 199, 155)
+uiMid = color.rgb(188, 190, 194)
+
+displaySmoothLen = input.int(6, "Display smoothing (visual only)", minval=1, maxval=20, group="12 Appearance", display=display.none)
+displayScoreBase = displaySmoothLen > 1 ? ta.ema(score, displaySmoothLen) : score
+displayScore = ta.ema(displayScoreBase, 2)
+
+hline(overBought, "Overbought", color=color.new(uiRed, 82), linestyle=hline.style_solid, linewidth=1)
+hline(50, "Midline", color=color.new(uiMid, 82), linestyle=hline.style_solid, linewidth=1)
+hline(overSold, "Oversold", color=color.new(uiGreen, 84), linestyle=hline.style_solid, linewidth=1)
+
+hline(strongOverBought, "Extreme overbought", color=color.new(uiRed, 34), linestyle=hline.style_solid, linewidth=1)
+hline(strongOverSold, "Extreme oversold", color=color.new(uiGreen, 34), linestyle=hline.style_solid, linewidth=1)
+
+uiObActive = not na(displayScore) and displayScore > strongOverBought
+uiOsActive = not na(displayScore) and displayScore < strongOverSold
+
+uiObFillTop = uiObActive ? displayScore : na
+uiObFillBase = uiObActive ? strongOverBought : na
+uiOsFillBottom = uiOsActive ? displayScore : na
+uiOsFillBase = uiOsActive ? strongOverSold : na
+
+uiObFillTopPlot = plot(uiObFillTop, title="UI overbought fill upper edge", color=color.new(uiRed, 100), linewidth=1, style=plot.style_stepline, display=display.pane)
+uiObFillBasePlot = plot(uiObFillBase, title="UI overbought fill baseline", color=color.new(uiRed, 100), linewidth=1, style=plot.style_stepline, display=display.pane)
+
+uiOsFillBottomPlot = plot(uiOsFillBottom, title="UI oversold fill lower edge", color=color.new(uiGreen, 100), linewidth=1, style=plot.style_stepline, display=display.pane)
+uiOsFillBasePlot = plot(uiOsFillBase, title="UI oversold fill baseline", color=color.new(uiGreen, 100), linewidth=1, style=plot.style_stepline, display=display.pane)
+
+fill(uiObFillTopPlot, uiObFillBasePlot, title="Extreme overbought fill", color=color.new(uiRed, 12), fillgaps=false)
+fill(uiOsFillBottomPlot, uiOsFillBasePlot, title="Extreme oversold fill", color=color.new(uiGreen, 12), fillgaps=false)
+
+uiScoreColor =
+     not na(score) and score > strongOverBought ? uiRed :
+     not na(score) and score < strongOverSold ? uiGreen :
+     uiLineNeutral
+
+plot(displayScore, title="OBOS", color=uiScoreColor, linewidth=2, style=plot.style_stepline, display=display.pane)
+
+// Alerts
+alertcondition(buySignal, title="OBOS V9.2 Upward Recovery", message="OBOS V9.2 Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(sellSignal, title="OBOS V9.2 Downward Recovery", message="OBOS V9.2 Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(strongBuySignal, title="OBOS V9.2 Enhanced Upward Recovery", message="OBOS V9.2 Enhanced Upward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(strongSellSignal, title="OBOS V9.2 Enhanced Downward Recovery", message="OBOS V9.2 Enhanced Downward Recovery | {{ticker}} | {{interval}} | close={{close}}")
+
+useDynamicAlerts = input.bool(true, "Enable dynamic alert messages (create the alert manually)", group="13 Alerts", display=display.none)
+if useDynamicAlerts and anySignal
+    signalTime = na(time_close) ? "Unknown bar close time" : str.format_time(time_close, "yyyy-MM-dd HH:mm:ss", syminfo.timezone)
+    laneText = signalLaneCode == 1 ? "Trend pullback" : signalLaneCode == 2 ? "Mean reversion" : "Unknown"
+    alertMessage = "OBOS V9.2 | " + syminfo.tickerid + " | TF=" + timeframe.period + " | " + signalName + " | Lane=" + laneText + " | State=" + (barstate.isconfirmed ? "Closed" : "Intrabar - may change") + " | Q=" + str.tostring(math.round(signalQ)) + " | price=" + str.tostring(close, format.mintick) + " | bar_close=" + signalTime + " " + syminfo.timezone
+    if confirmOnClose
+        alert(alertMessage, alert.freq_once_per_bar_close)
+    else
+        alert(alertMessage, alert.freq_once_per_bar)
